@@ -9,16 +9,14 @@ import logging
 import os
 import numpy as np
 import pandas as pd
-import joblib
+from collections import deque
+import random
 import tensorflow as tf
 import keras as ke
 from typing import List, Dict, Optional, Tuple, Union
 import datetime
-import random
-from collections import deque
 
 from trading_manager.base import TradingManager
-from data.processing import calculate_technical_indicators, normalize_indicators
 
 logger = logging.getLogger(__name__)
 
@@ -276,8 +274,8 @@ class RLTradingManager(TradingManager):
         logger.info("Updated target network weights")
     
     def calculate_reward(self, symbol: str, action: int, 
-                     prev_price: float, current_price: float,
-                     position: int = 0, trade_cost: float = 0.001) -> float:
+                         prev_price: float, current_price: float,
+                         position: int = 0, trade_cost: float = 0.001) -> float:
         """
         Calculate reward for reinforcement learning.
         
@@ -496,7 +494,7 @@ class RLTradingManager(TradingManager):
             return {'status': 'error', 'message': str(e)}
 
     def train_rl_model(self, symbols: list = None, episodes: int = 100, 
-                    data_lookback_days: int = 90) -> Dict:
+                      data_lookback_days: int = 90) -> Dict:
         """
         Train the RL model on historical data.
         
@@ -602,7 +600,7 @@ class RLTradingManager(TradingManager):
                 
                 # Log progress
                 logger.info(f"Episode {episode+1} completed with reward: {episode_reward:.4f}, "
-                        f"epsilon: {self.rl_config['epsilon']:.4f}")
+                           f"epsilon: {self.rl_config['epsilon']:.4f}")
             
             # Save the trained model
             self.save_rl_model()
@@ -684,7 +682,7 @@ class RLTradingManager(TradingManager):
                     logger.error(f"Error processing {symbol} in RL trading cycle: {e}")
             
             logger.info(f"Completed RL trading cycle: processed {cycle_results['processed']} symbols, "
-                    f"executed {cycle_results['trades_executed']} trades")
+                      f"executed {cycle_results['trades_executed']} trades")
             
             return cycle_results
             
