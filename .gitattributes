@@ -1,0 +1,16 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Python files
+*.py text diff=python
+
+# Jupyter notebook
+*.ipynb text
+
+# Documentation
+*.md text
+*.txt text
+
+# Exclude these files from github statistics
+docs/* linguist-documentation
+notebooks/* linguist-documentation
