@@ -1,0 +1,36 @@
+{
+    "ibkr": {
+        "host": "127.0.0.1",
+        "port": 7497,
+        "client_id": 1
+    },
+    "portfolio_manager": {
+        "market_scan_interval": 3600,
+        "max_symbols": 5,
+        "max_sector_exposure": 0.3,
+        "risk_allocation": 0.02
+    },
+    "trading_manager": {
+        "timeframe": "1h",
+        "max_day_trades_per_week": 3,
+        "stop_loss_atr_multiplier": 2.0,
+        "take_profit_atr_multiplier": 3.0,
+        "max_drawdown_percentage": 5.0
+    },
+    "risk_management": {
+        "max_position_size_percentage": 0.1,
+        "min_sharpe_ratio": 0.5,
+        "risk_free_rate": 0.03
+    },
+    "initial_capital": 2500,
+    "data": {
+        "symbols": [
+            "AAPL",
+            "MSFT",
+            "GOOGL",
+            "AMZN",
+            "TSLA"
+        ],
+        "lookback_period": 365
+    }
+}
