@@ -1,0 +1,12 @@
+{
+  "trained_date": "2000-01-01T00:00:00",
+  "symbol": "TSLA",
+  "metrics": {
+    "rmse": 0.0,
+    "mae": 0.0,
+    "r2": 0.0
+  },
+  "reliability_index": 0.0,
+  "status": "pending",
+  "message": "Initial placeholder metadata"
+}

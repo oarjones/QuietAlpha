@@ -120,7 +120,7 @@ class TradingManager:
             return self.ibkr.connect()
         return True
     
-    def get_market_data(self, symbol: str, lookback_periods: int = 100) -> pd.DataFrame:
+    def get_market_data(self, symbol: str, lookback_periods: int = 200) -> pd.DataFrame:
         """
         Get historical market data for a symbol.
         
@@ -175,16 +175,35 @@ class TradingManager:
             logger.warning(f"No data returned for {symbol}")
             return pd.DataFrame()
         
+        # Handle datetime
+        if 'datetime' in df.columns:
+            df['datetime'] = pd.to_datetime(df['datetime'])
+        else:
+            logger.warning("No datetime column found, creating one")
+            df['datetime'] = pd.date_range(end=datetime.now(), periods=len(df), freq='H')
+            
+        # Sort by datetime
+        df.sort_values('datetime', inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        
         # Calculate technical indicators
-        df = calculate_technical_indicators(df)
+        df = calculate_technical_indicators(df, include_all=True)
         df = calculate_trend_indicator(df)
         df = normalize_indicators(df)
+
+        # Remove NaN values
+        df.dropna(inplace=True)
         
         return df
     
+    
+    
     def predict_price_with_lstm(self, symbol: str, data: pd.DataFrame = None) -> Dict:
         """
-        Use pre-trained LSTM model to predict future price.
+        Use LSTM model to predict future price.
+        
+        This version supports both universal and symbol-specific models,
+        and uses a percentage-based approach for price prediction.
         
         Args:
             symbol (str): Symbol to predict for
@@ -193,49 +212,151 @@ class TradingManager:
         Returns:
             Dict: Prediction results
         """
-        # Check if we have a model for this symbol
-        if symbol not in self.lstm_models:
-            logger.warning(f"No LSTM model available for {symbol}")
-            return {'predicted_direction': 'unknown', 'confidence': 0}
-        
         try:
             # Fetch data if not provided
             if data is None or data.empty:
                 data = self.get_market_data(symbol)
-                
+                    
             if data.empty:
                 logger.warning(f"No data available for {symbol}")
                 return {'predicted_direction': 'unknown', 'confidence': 0}
             
-            # Prepare data for prediction (similar to how it was prepared for training)
-            model = self.lstm_models[symbol]
-            scaler = self.lstm_scalers.get(symbol)
+            # Try to get symbol-specific model first
+            from lstm.model_manager import LSTMModelManager
+            model_manager = LSTMModelManager()
             
-            # Extract features
+            # Check if symbol-specific model exists
+            symbol_specific = False
+            if model_manager.model_exists(symbol) and model_manager.model_is_fresh(symbol):
+                # Load symbol-specific model
+                model, scaler = model_manager.load_model_and_scaler(symbol)
+                if model is not None:
+                    logger.info(f"Using symbol-specific LSTM model for {symbol}")
+                    symbol_specific = True
+            
+            # Fall back to universal model if no symbol-specific model
+            if not symbol_specific:
+                if not hasattr(self, 'universal_lstm_model') or self.universal_lstm_model is None:
+                    # Load universal model
+                    if model_manager is not None:
+                        model, scaler = model_manager.load_universal_model_and_scaler()
+                    else:
+                        # Legacy path for loading universal model
+                        model_path = os.path.join('models', 'lstm', 'lstm_model_universal.keras')
+                        scaler_path = os.path.join('models', 'lstm', 'scaler_universal.pkl')
+                        
+                        try:
+                            model = ke.models.load_model(model_path)
+                            scaler = joblib.load(scaler_path)
+                            logger.info(f"Loaded universal LSTM model")
+                        except Exception as e:
+                            logger.warning(f"Could not load universal LSTM model: {e}")
+                            return {'predicted_direction': 'unknown', 'confidence': 0}
+                    
+                    # Cache for future use
+                    self.universal_lstm_model = model
+                    self.universal_lstm_scaler = scaler
+                else:
+                    # Use cached universal model
+                    model = self.universal_lstm_model
+                    scaler = self.universal_lstm_scaler
+                
+                logger.info(f"Using universal LSTM model for {symbol}")
+            
+            # Prepare data for prediction
+            # 1. Ensure we have all needed technical indicators
+            if 'RSI_14' not in data.columns:
+                data = calculate_technical_indicators(data, include_all=True)
+                data = calculate_trend_indicator(data)
+                data = normalize_indicators(data)
+            
+            # 2. Get normalized features
             feature_cols = [col for col in data.columns if col.endswith('_norm')]
             
-            # Create sequence (use last seq_length rows)
+            # 3. Ensure close_norm is included
+            if 'close_norm' not in feature_cols and 'close_norm' in data.columns:
+                feature_cols.append('close_norm')
+            
+            # 4. Check if we have enough data
             seq_length = 60  # This should match the training seq_length
             if len(data) < seq_length:
                 logger.warning(f"Not enough data for {symbol}, need at least {seq_length} periods")
                 return {'predicted_direction': 'unknown', 'confidence': 0}
             
-            # Extract the last sequence
+            # 5. Check feature count compatibility
+            expected_features = 41  # The number of features used during training
+            current_features = len(feature_cols)
+            
+            # Log feature counts for debugging
+            logger.info(f"Model expects {expected_features} features, found {current_features} features")
+            
+            # If we don't have the exact number of features needed, adjust our features
+            if current_features != expected_features:
+                logger.warning(f"Feature count mismatch: expected {expected_features}, got {current_features}")
+                
+                # Option 1: Add missing features with default values if we have fewer than expected
+                if current_features < expected_features:
+                    missing_count = expected_features - current_features
+                    logger.info(f"Adding {missing_count} placeholder features with default values")
+                    # Add placeholder columns with 0.5 (neutral value)
+                    for i in range(missing_count):
+                        placeholder_name = f"placeholder_{i}_norm"
+                        data[placeholder_name] = 0.5
+                        feature_cols.append(placeholder_name)
+                
+                # Option 2: Select only the most important features if we have more than expected
+                elif current_features > expected_features:
+                    logger.info(f"Selecting {expected_features} most important features from {current_features}")
+                    # Ensure we keep close_norm as it's the primary target
+                    essential_features = ['close_norm']
+                    # Add other important features 
+                    important_features = [
+                        'TrendStrength_norm', 'RSI_14_norm', 'EMA_8_norm', 'EMA_21_norm', 'SMA_34_norm',
+                        'MACD_diff_norm', 'MACD_line_norm', 'MACD_signal_norm', 'ATR_14_norm',
+                        'Stoch_k_norm', 'Stoch_d_norm', 'BB_Width_norm', 'ADX_14_norm',
+                        'volume_norm', 'OBV_norm'
+                    ]
+                    
+                    # Ensure these features exist in the data
+                    available_important = [f for f in important_features if f in feature_cols]
+                    
+                    # Combine essential and important features
+                    selected_features = essential_features + available_important
+                    
+                    # If we still need more features, add remaining ones until we reach expected count
+                    remaining_features = [f for f in feature_cols if f not in selected_features]
+                    needed_count = expected_features - len(selected_features)
+                    if needed_count > 0 and len(remaining_features) > 0:
+                        additional_features = remaining_features[:needed_count]
+                        selected_features.extend(additional_features)
+                    
+                    # If we still don't have enough, add placeholder features
+                    if len(selected_features) < expected_features:
+                        missing_count = expected_features - len(selected_features)
+                        for i in range(missing_count):
+                            placeholder_name = f"placeholder_{i}_norm"
+                            data[placeholder_name] = 0.5
+                            selected_features.append(placeholder_name)
+                    
+                    # Trim to expected count if we have too many
+                    feature_cols = selected_features[:expected_features]
+                    
+                logger.info(f"Adjusted feature count: {len(feature_cols)}")
+            
+            # 6. Extract the last sequence
             sequence = data[feature_cols].values[-seq_length:]
             
-            # Reshape for model input
+            # 7. Reshape for model input
             X = np.array([sequence])
             
-            # If we have a scaler, transform the data
-            if scaler:
-                X = scaler.transform(X.reshape(-1, X.shape[-1])).reshape(X.shape)
+            # 8. Make prediction
+            prediction = model.predict(X, verbose=0)[0][0]
             
-            # Make prediction
-            prediction = model.predict(X)[0][0]
-            
-            # Get the current normalized close and determine if prediction is higher or lower
+            # 9. Get the current normalized close and determine if prediction is higher or lower
             current_close_norm = data['close_norm'].iloc[-1]
+            current_close = data['close'].iloc[-1]
             
+            # 10. Determine direction and confidence
             if prediction > current_close_norm:
                 direction = 'up'
                 confidence = min(1.0, (prediction - current_close_norm) * 10)  # Scale difference to confidence
@@ -246,21 +367,60 @@ class TradingManager:
                 direction = 'neutral'
                 confidence = 0.0
             
-            return {
+            # 11. Calculate predicted price using percentage-based approach
+            # Get recent volatility as a guide
+            atr = data['ATR_14'].iloc[-1] if 'ATR_14' in data.columns else current_close * 0.01
+            price_volatility = atr / current_close  # Normalized volatility
+            
+            # Base expected change on confidence and volatility
+            volatility_factor = 5  # Multiplier for volatility (can be tuned)
+            expected_pct_change = confidence * price_volatility * volatility_factor
+            
+            # Limit to reasonable change (e.g., maximum 2% per period)
+            max_pct_change = 0.02
+            expected_pct_change = min(expected_pct_change, max_pct_change)
+            
+            # Calculate predicted price
+            if direction == 'up':
+                predicted_price = current_close * (1 + expected_pct_change)
+            elif direction == 'down':
+                predicted_price = current_close * (1 - expected_pct_change)
+            else:
+                predicted_price = current_close
+            
+            # 12. Prepare result
+            result = {
                 'predicted_direction': direction,
-                'predicted_value': float(prediction),
-                'current_value': float(current_close_norm),
+                'predicted_value_norm': float(prediction),
+                'current_value_norm': float(current_close_norm),
                 'confidence': float(confidence),
+                'current_price': float(current_close),
+                'predicted_price': float(predicted_price),
+                'price_change': float(predicted_price - current_close),
+                'price_change_pct': float((predicted_price / current_close - 1) * 100),
+                'model_type': 'symbol_specific' if symbol_specific else 'universal',
                 'timestamp': datetime.datetime.now().isoformat()
             }
             
+            return result
+                
         except Exception as e:
             logger.error(f"Error predicting with LSTM for {symbol}: {e}")
             return {'predicted_direction': 'error', 'confidence': 0, 'error': str(e)}
+
+        
+
     
+    """
+    Modified generate_trading_signals method for TradingManager
+
+    This code should replace or modify the generate_trading_signals method in the TradingManager
+    class to better integrate the universal LSTM model's predictions with technical analysis.
+    """
+
     def generate_trading_signals(self, symbol: str, data: pd.DataFrame = None) -> Dict:
         """
-        Generate trading signals based on technical analysis and ML predictions.
+        Generate trading signals based on technical analysis and universal LSTM predictions.
         
         Args:
             symbol (str): Symbol to generate signals for
@@ -273,7 +433,7 @@ class TradingManager:
             # Fetch data if not provided
             if data is None or data.empty:
                 data = self.get_market_data(symbol)
-                
+                    
             if data.empty:
                 logger.warning(f"No data available for {symbol}")
                 return {'signal': 'neutral', 'strength': 0}
@@ -342,13 +502,45 @@ class TradingManager:
                     signal_strength += 5
                     signal_reasons.append('tight_consolidation')
             
-            # Incorporate LSTM prediction
+            # Enhanced LSTM prediction integration
             if lstm_prediction['predicted_direction'] == 'up':
-                signal_strength += 25 * lstm_prediction['confidence']
-                signal_reasons.append('lstm_bullish')
+                # Scale the impact based on confidence and price change percentage
+                lstm_weight = 25
+                if 'price_change_pct' in lstm_prediction:
+                    # Increase weight for larger predicted price movements
+                    price_change_pct = abs(lstm_prediction['price_change_pct'])
+                    if price_change_pct > 1.0:  # If predicting more than 1% change
+                        lstm_weight = 35
+                    elif price_change_pct > 0.5:  # If predicting more than 0.5% change
+                        lstm_weight = 30
+                
+                lstm_impact = lstm_weight * lstm_prediction['confidence']
+                signal_strength += lstm_impact
+                signal_reasons.append(f'lstm_bullish_{lstm_prediction["confidence"]:.2f}')
+                
+                # Add extra weight if LSTM and technical analysis agree
+                if signal_strength > 0:
+                    signal_strength += 10
+                    signal_reasons.append('lstm_technical_agreement')
             elif lstm_prediction['predicted_direction'] == 'down':
-                signal_strength -= 25 * lstm_prediction['confidence']
-                signal_reasons.append('lstm_bearish')
+                # Scale the impact based on confidence and price change percentage
+                lstm_weight = 25
+                if 'price_change_pct' in lstm_prediction:
+                    # Increase weight for larger predicted price movements
+                    price_change_pct = abs(lstm_prediction['price_change_pct'])
+                    if price_change_pct > 1.0:  # If predicting more than 1% change
+                        lstm_weight = 35
+                    elif price_change_pct > 0.5:  # If predicting more than 0.5% change
+                        lstm_weight = 30
+                
+                lstm_impact = lstm_weight * lstm_prediction['confidence']
+                signal_strength -= lstm_impact
+                signal_reasons.append(f'lstm_bearish_{lstm_prediction["confidence"]:.2f}')
+                
+                # Add extra weight if LSTM and technical analysis agree
+                if signal_strength < 0:
+                    signal_strength -= 10
+                    signal_reasons.append('lstm_technical_agreement')
             
             # Determine final signal
             if signal_strength > 30:
@@ -375,6 +567,8 @@ class TradingManager:
         except Exception as e:
             logger.error(f"Error generating signals for {symbol}: {e}")
             return {'signal': 'error', 'strength': 0, 'error': str(e)}
+
+    
     
     def check_day_trade_limit(self) -> bool:
         """

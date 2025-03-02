@@ -1,0 +1,18 @@
+{
+  "trained_date": "2025-03-02T20:04:16.997270",
+  "symbol": "universal",
+  "metrics": {
+    "rmse": 0.0,
+    "mae": 0.0,
+    "r2": 0.0
+  },
+  "reliability_index": 0.7,
+  "training_data": {
+    "symbols": [
+      "AMZN"
+    ],
+    "periods": 0,
+    "start_date": "2022-01-01T00:00:00",
+    "end_date": "2025-02-28T00:00:00"
+  }
+}
