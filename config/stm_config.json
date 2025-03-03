@@ -1,0 +1,67 @@
+{
+    "ibkr": {
+        "host": "127.0.0.1",
+        "port": 4002,
+        "client_id": 1
+    },
+    "portfolio_manager": {
+        "market_scan_interval": 3600,
+        "max_symbols": 5,
+        "max_sector_exposure": 0.3,
+        "risk_allocation": 0.02,
+        "lstm": {
+            "enabled": true,
+            "weight": 0.3,
+            "max_training_models": 5,
+            "max_initial_symbols": 50,
+            "training_interval": 86400,
+            "prediction_cache_ttl": 3600,
+            "reliability_threshold": 0.6,
+            "force_retrain_days": 30,
+            "model_quality_threshold": 0.7
+        }
+    },
+    "trading_manager": {
+        "timeframe": "1h",
+        "max_day_trades_per_week": 3,
+        "stop_loss_atr_multiplier": 2.0,
+        "take_profit_atr_multiplier": 3.0,
+        "max_drawdown_percentage": 5.0,
+        "lstm": {
+            "prediction_weight": 0.4,
+            "min_confidence": 0.6,
+            "use_for_exits": true
+        }
+    },
+    "risk_management": {
+        "max_position_size_percentage": 0.1,
+        "min_sharpe_ratio": 0.5,
+        "risk_free_rate": 0.03
+    },
+    "initial_capital": 2500,
+    "data": {
+        "symbols": [
+            "AAPL",
+            "MSFT",
+            "GOOGL",
+            "AMZN",
+            "TSLA"
+        ],
+        "lookback_period": 365
+    },
+    "lstm_service": {
+        "training_threads": 2,
+        "enable_monitoring": true,
+        "schedule_priority": {
+            "portfolio_symbols": 20,
+            "watchlist_symbols": 40,
+            "scanning_symbols": 60,
+            "on_demand_symbols": 30
+        },
+        "retraining": {
+            "auto_retrain": true,
+            "min_reliability_for_update": 0.5,
+            "force_retrain_age_days": 45
+        }
+    }
+}

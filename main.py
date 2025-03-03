@@ -1,8 +1,8 @@
 """
-Main application entry point for QuietAlpha Trading Bot
+Main application entry point with LSTM integration
 
-This module provides the main entry point for running the trading bot,
-integrating the Portfolio Manager and Trading Manager components.
+This module updates the main entry point to support LSTM-enhanced portfolio management.
+It incorporates the LSTM portfolio manager when enabled in configuration.
 """
 
 import os
@@ -13,12 +13,19 @@ import datetime
 import json
 from typing import Dict, List
 
+# Import original components
 from portfolio_manager.base import PortfolioManager
 from portfolio_manager.xgboost_manager import XGBoostPortfolioManager
 from trading_manager.base import TradingManager
 from trading_manager.rl_trading_manager import RLTradingManager
+
+# Import LSTM-enhanced components
+from portfolio_manager.lstm_enhanced_manager import LSTMEnhancedPortfolioManager
+from lstm.integration import get_lstm_service
+
+# Import utilities
 from ibkr_api.interface import IBKRInterface
-from utils.data_utils import load_config, save_config
+from utils.data_utils import load_config, merge_configs, save_config
 
 # Configure logging
 logging.basicConfig(
@@ -34,25 +41,41 @@ logger = logging.getLogger(__name__)
 
 class QuietAlphaTradingBot:
     """
-    Main trading bot class that integrates Portfolio Manager and Trading Manager components.
+    Main trading bot class with LSTM integration support.
     """
     
-    def __init__(self, config_path: str = None):
+    def __init__(self, config_path: str = None, lstm_config_path: str = None):
         """
-        Initialize trading bot.
+        Initialize trading bot with optional LSTM configuration.
         
         Args:
-            config_path (str): Path to configuration file
+            config_path (str): Path to main configuration file
+            lstm_config_path (str): Path to LSTM-specific configuration file
         """
         # Create logs directory if it doesn't exist
         os.makedirs('logs', exist_ok=True)
         
-        # Load configuration
+        # Load configuration files
         self.config_path = config_path or os.path.join('config', 'base_config.json')
         self.config = load_config(self.config_path)
         
+        # Load and merge LSTM config if provided
+        if lstm_config_path:
+            lstm_config = load_config(lstm_config_path)
+            self.config = merge_configs(self.config, lstm_config)
+        
         # Initialize IBKR interface
         self.ibkr = self._init_ibkr_interface()
+        
+        # Check if LSTM is enabled
+        self.lstm_enabled = self.config.get('portfolio_manager', {}).get('lstm', {}).get('enabled', False)
+        
+        # Initialize LSTM service if enabled
+        if self.lstm_enabled:
+            logger.info("LSTM integration enabled, initializing LSTM service")
+            self.lstm_service = get_lstm_service(ibkr_interface=self.ibkr)
+        else:
+            self.lstm_service = None
         
         # Initialize Portfolio Manager
         self.portfolio_manager = self._init_portfolio_manager()
@@ -67,6 +90,8 @@ class QuietAlphaTradingBot:
         self.current_portfolio = {}
         
         logger.info("QuietAlpha Trading Bot initialized")
+        if self.lstm_enabled:
+            logger.info("LSTM integration active")
     
     def _init_ibkr_interface(self) -> IBKRInterface:
         """Initialize IBKR interface."""
@@ -81,9 +106,22 @@ class QuietAlphaTradingBot:
         return ibkr
     
     def _init_portfolio_manager(self) -> PortfolioManager:
-        """Initialize Portfolio Manager."""
+        """Initialize Portfolio Manager with LSTM support if enabled."""
         pm_type = self.config.get('portfolio_manager_type', 'xgboost')
         
+        # Handle LSTM-enhanced case
+        if self.lstm_enabled:
+            logger.info("Initializing LSTM-Enhanced Portfolio Manager")
+            if pm_type == 'xgboost':
+                logger.info("Using XGBoost as base for LSTM-enhanced Portfolio Manager")
+                # In this case, we still use the LSTM enhanced manager
+                # The XGBoost functionality is already included via inheritance
+                return LSTMEnhancedPortfolioManager(config_path=self.config_path, ibkr_interface=self.ibkr)
+            else:
+                logger.info("Using base implementation for LSTM-enhanced Portfolio Manager")
+                return LSTMEnhancedPortfolioManager(config_path=self.config_path, ibkr_interface=self.ibkr)
+        
+        # Regular (non-LSTM) portfolio managers
         if pm_type == 'xgboost':
             logger.info("Initializing XGBoost Portfolio Manager")
             return XGBoostPortfolioManager(config_path=self.config_path, ibkr_interface=self.ibkr)
@@ -142,6 +180,11 @@ class QuietAlphaTradingBot:
                 # Log portfolio update
                 logger.info(f"Portfolio updated with {len(self.current_portfolio)} symbols")
                 logger.info(f"Symbols: {list(self.current_portfolio.keys())}")
+                
+                # If LSTM is enabled, log additional info
+                if self.lstm_enabled and 'lstm_training' in update_result:
+                    lstm_training = update_result['lstm_training']
+                    logger.info(f"LSTM training requested for {lstm_training.get('requested', 0)} symbols")
             else:
                 logger.warning(f"Portfolio update failed: {update_result}")
             
@@ -345,17 +388,23 @@ class QuietAlphaTradingBot:
             return False
 
 def main():
-    """Main entry point for running the trading bot."""
-    parser = argparse.ArgumentParser(description='QuietAlpha Trading Bot')
+    """Main entry point for running the trading bot with LSTM support."""
+    parser = argparse.ArgumentParser(description='QuietAlpha Trading Bot with LSTM')
     parser.add_argument('--config', type=str, help='Path to configuration file')
+    parser.add_argument('--lstm-config', type=str, help='Path to LSTM configuration file')
     parser.add_argument('--train', action='store_true', help='Train models')
     parser.add_argument('--interval', type=int, default=3600, help='Trading cycle interval in seconds')
     parser.add_argument('--backtest', action='store_true', help='Run backtest instead of live trading')
+    parser.add_argument('--enable-lstm', action='store_true', help='Enable LSTM integration')
     
     args = parser.parse_args()
     
+    # If LSTM config is not specified but enable-lstm flag is set, use default
+    if args.enable_lstm and not args.lstm_config:
+        args.lstm_config = os.path.join('config', 'lstm_config.json')
+    
     # Create bot instance
-    bot = QuietAlphaTradingBot(config_path=args.config)
+    bot = QuietAlphaTradingBot(config_path=args.config, lstm_config_path=args.lstm_config)
     
     # Train models if requested
     if args.train:
