@@ -16,7 +16,11 @@ import os
 import sys
 import logging
 import argparse
+import time
 from typing import Dict
+
+# Import service
+from lstm.integration import get_lstm_service, LSTMService
 
 # Configure logging
 logging.basicConfig(
@@ -24,6 +28,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
 
 # Ensure we can import from project root
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -77,7 +82,7 @@ def check_universal_model():
             trained_date = datetime.fromisoformat(metadata.get('trained_date', '2000-01-01T00:00:00'))
             days_old = (datetime.now() - trained_date).days
             
-            if days_old > 30:
+            if days_old > 60:
                 logger.warning(f"Universal model is {days_old} days old, consider retraining")
             else:
                 logger.info(f"Universal model is {days_old} days old")
@@ -89,7 +94,7 @@ def check_universal_model():
         logger.warning("Universal model not found")
         return False
 
-def start_lstm_service():
+def start_lstm_service() -> LSTMService: 
     """
     Start the LSTM service.
     
@@ -97,23 +102,21 @@ def start_lstm_service():
         bool: True if service started successfully, False otherwise
     """
     try:
-        # Import service
-        from lstm.integration import get_lstm_service
-        
+                
         # Start service
         service = get_lstm_service()
         
         # Check if service is running
         if service._initialized:
             logger.info("LSTM service started successfully")
-            return True
+            return service
         else:
             logger.error("LSTM service failed to initialize properly")
-            return False
+            return None
             
     except Exception as e:
         logger.error(f"Error starting LSTM service: {e}")
-        return False
+        return None
 
 def update_trading_manager():
     """
@@ -199,59 +202,40 @@ def train_initial_models(symbols=None, train_universal=True):
 
 def main():
     """Main function."""
-    parser = argparse.ArgumentParser(description='Initialize LSTM System')
-    parser.add_argument('--symbols', type=str, nargs='+', default=['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA'],
-                      help='Symbols to initialize')
-    parser.add_argument('--train-universal', action='store_true',
-                      help='Train universal model if not exists')
-    parser.add_argument('--skip-training', action='store_true',
-                      help='Skip training initial models')
-    parser.add_argument('--check-only', action='store_true',
-                      help='Only check system status without making changes')
-    
-    args = parser.parse_args()
-    
-    # Check only mode
-    if args.check_only:
-        logger.info("Running in check-only mode")
-        
-        # Check directory structure
-        setup_directory_structure()
-        
-        # Check universal model
-        has_universal = check_universal_model()
-        
-        # Check symbol-specific models
-        from lstm.model_manager import LSTMModelManager
-        model_manager = LSTMModelManager()
-        
-        available_models = model_manager.get_available_models()
-        missing_models = [symbol for symbol in args.symbols if symbol not in available_models]
-        
-        logger.info(f"Available models: {available_models}")
-        logger.info(f"Missing models: {missing_models}")
-        
-        # Exit without changing anything
-        return 0
-    
+       
+
     # Setup directory structure
     setup_directory_structure()
+
+    # Update Trading Manager
+    #tm_updated = update_trading_manager()
     
     # Train initial models if needed
-    if not args.skip_training:
-        train_results = train_initial_models(args.symbols, args.train_universal)
-        logger.info(f"Training results: {train_results}")
+    train_results = train_initial_models(['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA'], False)
+    logger.info(f"Training results: {train_results}")
     
     # Start LSTM service
-    service_started = start_lstm_service()
-    
-    # Update Trading Manager
-    tm_updated = update_trading_manager()
+    service = start_lstm_service()        
     
     # Report status
-    if service_started and tm_updated:
+    if not service is None: #and tm_updated:
         logger.info("LSTM system initialized successfully")
-        return 0
+        
+        # Bucle de espera para mantener vivo el proceso
+        try:
+            while True:
+                time.sleep(25)
+                training_status = service.trainer.get_training_status('AAPL')
+                if training_status and training_status.get('status') in ['training', 'scheduled']:
+                    logger.info(f"AAPL training_status: {training_status}")  
+                else:
+                    logger.info("No hay entrenamientos en curso")                      
+
+        except KeyboardInterrupt:
+            logger.info("Terminación manual de la espera.")
+            return 0
+
+
     else:
         logger.warning("LSTM system initialization completed with warnings")
         return 1

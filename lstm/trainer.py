@@ -66,9 +66,14 @@ class LSTMTrainer:
         self.ibkr = ibkr_interface
         if self.ibkr is None:
             host = self.config.get('ibkr', {}).get('host', '127.0.0.1')
-            port = self.config.get('ibkr', {}).get('port', 7497)
+            port = self.config.get('ibkr', {}).get('port', 4002)
             client_id = self.config.get('ibkr', {}).get('client_id', 1)
             self.ibkr = IBKRInterface(host=host, port=port, client_id=client_id)
+        
+        # Save IBKR connection parameters for worker threads
+        self.ibkr_host = self.ibkr.host
+        self.ibkr_port = self.ibkr.port
+        self.ibkr_client_id = self.ibkr.client_id
         
         # Initialize model manager
         self.model_manager = LSTMModelManager()
@@ -220,8 +225,23 @@ class LSTMTrainer:
         try:
             logger.info(f"Starting training for {symbol}")
             
-            # Submit the training task to the executor
-            future = self.executor.submit(self.train_lstm_model, symbol, config)
+            # Crear una nueva instancia de IBKRInterface para cada worker
+            # Usar un client_id único para evitar conflictos
+            from ibkr_api.interface import IBKRInterface
+            
+            # Generar un ID de cliente único basado en el símbolo
+            # Usar hash para asegurarse de que es reproducible pero único por símbolo
+            unique_client_id = self.ibkr_client_id + (hash(symbol) % 1000)
+            
+            # Crear la nueva interfaz
+            ibkr = IBKRInterface(
+                host=self.ibkr_host,
+                port=self.ibkr_port,
+                client_id=unique_client_id
+            )
+            
+            # Submit the training task to the executor with the new IBKR interface
+            future = self.executor.submit(self.train_lstm_model, symbol, config, ibkr)
             
             # Store the future
             self.active_trainings[symbol] = future
@@ -444,7 +464,7 @@ class LSTMTrainer:
         logger.info(f"Scheduled training for {scheduled_count}/{len(symbols)} symbols")
         return scheduled_count
     
-    def train_lstm_model(self, symbol: str, config: Dict = None) -> Dict:
+    def train_lstm_model(self, symbol: str, config: Dict = None, ibkr_interface: IBKRInterface = None) -> Dict:
         """
         Train LSTM model for a specific symbol.
         This is the main training function that handles both fresh and incremental training.
@@ -452,6 +472,7 @@ class LSTMTrainer:
         Args:
             symbol: Symbol to train
             config: Training configuration
+            ibkr_interface: Dedicated IBKR interface for this training task
             
         Returns:
             dict: Training results
@@ -459,9 +480,12 @@ class LSTMTrainer:
         try:
             logger.info(f"Training LSTM model for {symbol}")
             
+            # Use provided IBKR interface or the default one
+            ibkr = ibkr_interface or self.ibkr
+            
             # Ensure we're connected to IBKR
-            if not self.ibkr.connected:
-                success = self.ibkr.connect()
+            if not ibkr.connected:
+                success = ibkr.connect()
                 if not success:
                     return {
                         'status': 'error',
@@ -489,13 +513,13 @@ class LSTMTrainer:
                 # If model is reliable, do incremental training
                 if reliability > 0.5:
                     logger.info(f"Model for {symbol} is reliable, doing incremental training")
-                    return self._incremental_training(symbol, config)
+                    return self._incremental_training(symbol, config, ibkr)
                 else:
                     logger.info(f"Model for {symbol} is not reliable, doing fresh training")
-                    return self._fresh_training(symbol, config)
+                    return self._fresh_training(symbol, config, ibkr)
             else:
                 logger.info(f"No existing model for {symbol}, doing fresh training")
-                return self._fresh_training(symbol, config)
+                return self._fresh_training(symbol, config, ibkr)
                 
         except Exception as e:
             logger.error(f"Error in train_lstm_model for {symbol}: {e}")
@@ -504,13 +528,14 @@ class LSTMTrainer:
                 'message': str(e)
             }
     
-    def _fresh_training(self, symbol: str, config: Dict) -> Dict:
+    def _fresh_training(self, symbol: str, config: Dict, ibkr_interface: IBKRInterface = None) -> Dict:
         """
         Train a new LSTM model from scratch.
         
         Args:
             symbol: Symbol to train
             config: Training configuration
+            ibkr_interface: Dedicated IBKR interface for this training task
             
         Returns:
             dict: Training results
@@ -518,8 +543,11 @@ class LSTMTrainer:
         try:
             logger.info(f"Starting fresh training for {symbol}")
             
+            # Use provided IBKR interface or the default one
+            ibkr = ibkr_interface or self.ibkr
+            
             # Fetch historical data
-            df = fetch_historical_data(self.ibkr, symbol, lookback_days=self.min_training_data_days * 2)
+            df = fetch_historical_data(ibkr, symbol, lookback_days=self.min_training_data_days * 2)
             
             if df.empty:
                 return {
@@ -619,13 +647,14 @@ class LSTMTrainer:
                 'message': str(e)
             }
     
-    def _incremental_training(self, symbol: str, config: Dict) -> Dict:
+    def _incremental_training(self, symbol: str, config: Dict, ibkr_interface: IBKRInterface = None) -> Dict:
         """
         Incrementally update an existing LSTM model with new data.
         
         Args:
             symbol: Symbol to train
             config: Training configuration
+            ibkr_interface: Dedicated IBKR interface for this training task
             
         Returns:
             dict: Training results
@@ -633,13 +662,16 @@ class LSTMTrainer:
         try:
             logger.info(f"Starting incremental training for {symbol}")
             
+            # Use provided IBKR interface or the default one
+            ibkr = ibkr_interface or self.ibkr
+            
             # Load existing model and metadata
             model, scaler = self.model_manager.load_model_and_scaler(symbol)
             metadata = self.model_manager.get_model_metadata(symbol)
             
             if model is None or scaler is None:
                 logger.warning(f"Could not load existing model for {symbol}, falling back to fresh training")
-                return self._fresh_training(symbol, config)
+                return self._fresh_training(symbol, config, ibkr)
             
             # Get the last training date
             last_trained = datetime.fromisoformat(metadata.get('trained_date', '2000-01-01T00:00:00'))
@@ -647,7 +679,7 @@ class LSTMTrainer:
             
             # Fetch new data since last training (with some overlap)
             fetch_days = max(30, days_since_training + 15)  # At least 30 days, with 15 days overlap
-            df = fetch_historical_data(self.ibkr, symbol, lookback_days=fetch_days)
+            df = fetch_historical_data(ibkr, symbol, lookback_days=fetch_days)
             
             if df.empty:
                 return {
@@ -674,7 +706,7 @@ class LSTMTrainer:
             if X_new.shape[2] != input_shape[2]:
                 logger.warning(f"Feature mismatch in incremental training for {symbol}: {X_new.shape[2]} vs {input_shape[2]}")
                 logger.warning("Falling back to fresh training")
-                return self._fresh_training(symbol, config)
+                return self._fresh_training(symbol, config, ibkr)
             
             # Configure fewer epochs for incremental training
             incremental_config = config.copy()
@@ -742,7 +774,7 @@ class LSTMTrainer:
             logger.error(f"Error in incremental training for {symbol}: {e}")
             # If incremental fails, try fresh training as fallback
             logger.warning(f"Falling back to fresh training for {symbol}")
-            return self._fresh_training(symbol, config)
+            return self._fresh_training(symbol, config, ibkr)
     
     def _calculate_direction_accuracy(self, y_true, y_pred):
         """
@@ -902,9 +934,21 @@ class LSTMTrainer:
             
             logger.info(f"Training universal model using symbols: {base_symbols}")
             
+            # Crear una nueva instancia de IBKR dedicada para el entrenamiento universal
+            from ibkr_api.interface import IBKRInterface
+            
+            # Usar un ID de cliente especial para el modelo universal
+            universal_client_id = self.ibkr_client_id + 9999
+            
+            universal_ibkr = IBKRInterface(
+                host=self.ibkr_host,
+                port=self.ibkr_port,
+                client_id=universal_client_id
+            )
+            
             # Connect to IBKR if needed
-            if not self.ibkr.connected:
-                success = self.ibkr.connect()
+            if not universal_ibkr.connected:
+                success = universal_ibkr.connect()
                 if not success:
                     return {
                         'status': 'error',
@@ -916,7 +960,7 @@ class LSTMTrainer:
             
             for symbol in base_symbols:
                 # Fetch data
-                df = fetch_historical_data(self.ibkr, symbol, lookback_days=365)  # 1 year
+                df = fetch_historical_data(universal_ibkr, symbol, lookback_days=365)  # 1 year
                 
                 if df.empty:
                     logger.warning(f"No data fetched for {symbol}, skipping")
@@ -1041,6 +1085,12 @@ class LSTMTrainer:
                     'end_date': all_data['datetime'].max().isoformat() if 'datetime' in all_data else ''
                 }
             }
+            
+            # Disconnect the IBKR interface
+            try:
+                universal_ibkr.disconnect()
+            except:
+                pass
             
             # Save metadata
             metadata_path = os.path.join(universal_dir, "metadata.json")

@@ -198,74 +198,215 @@ class TradingManager:
     
     
     
-    
     def predict_price_with_lstm(self, symbol: str, data: pd.DataFrame = None) -> Dict:
         """
-        Utiliza modelos LSTM para predecir precios futuros.
-        Esta versión integra el nuevo sistema LSTM con modelos específicos por símbolo.
+        Use LSTM model to predict future price.
+        
+        This version supports both universal and symbol-specific models,
+        and uses a percentage-based approach for price prediction.
         
         Args:
-            symbol (str): Símbolo para el cual hacer la predicción
-            data (pd.DataFrame): Datos históricos (opcional, se obtienen si es None)
+            symbol (str): Symbol to predict for
+            data (pd.DataFrame): Historical data (optional, will fetch if None)
             
         Returns:
-            Dict: Resultado de la predicción
+            Dict: Prediction results
         """
         try:
-            # Importar el servicio LSTM (importación tardía para evitar dependencias circulares)
-            # Se importa aquí para no afectar al resto del módulo si no está disponible
-            from lstm.integration import predict_with_lstm, request_model_training
-            
-            # Obtener datos si no se proporcionan
+            # Fetch data if not provided
             if data is None or data.empty:
                 data = self.get_market_data(symbol)
-                
+                    
             if data.empty:
-                logger.warning(f"No hay datos disponibles para {symbol}")
+                logger.warning(f"No data available for {symbol}")
                 return {'predicted_direction': 'unknown', 'confidence': 0}
             
-            # Realizar predicción usando el servicio LSTM
-            prediction = predict_with_lstm(symbol, data, self.ibkr)
+            # Try to get symbol-specific model first
+            from lstm.model_manager import LSTMModelManager
+            model_manager = LSTMModelManager()
             
-            # Si la predicción falló, registrar error y devolver un marcador de posición
-            if prediction.get('status') != 'success':
-                logger.warning(f"La predicción LSTM falló para {symbol}: {prediction.get('message', 'Error desconocido')}")
-                return {'predicted_direction': 'unknown', 'confidence': 0}
+            # Check if symbol-specific model exists
+            symbol_specific = False
+            if model_manager.model_exists(symbol) and model_manager.model_is_fresh(symbol):
+                # Load symbol-specific model
+                model, scaler = model_manager.load_model_and_scaler(symbol)
+                if model is not None:
+                    logger.info(f"Using symbol-specific LSTM model for {symbol}")
+                    symbol_specific = True
             
-            # Si se usó el modelo universal, programar entrenamiento para un modelo específico
-            # Esto permite que el sistema aprenda y mejore con el tiempo
-            if prediction.get('model_type') == 'universal':
-                logger.info(f"Se usó el modelo universal para {symbol}, programando entrenamiento para modelo específico")
-                request_model_training(symbol, priority=70)  # Prioridad alta (número más bajo)
-            
-            return prediction
+            # Fall back to universal model if no symbol-specific model
+            if not symbol_specific:
+                if not hasattr(self, 'universal_lstm_model') or self.universal_lstm_model is None:
+                    # Load universal model
+                    if model_manager is not None:
+                        model, scaler = model_manager.load_universal_model_and_scaler()
+                    else:
+                        # Legacy path for loading universal model
+                        model_path = os.path.join('models', 'lstm', 'lstm_model_universal.keras')
+                        scaler_path = os.path.join('models', 'lstm', 'scaler_universal.pkl')
+                        
+                        try:
+                            model = ke.models.load_model(model_path)
+                            scaler = joblib.load(scaler_path)
+                            logger.info(f"Loaded universal LSTM model")
+                        except Exception as e:
+                            logger.warning(f"Could not load universal LSTM model: {e}")
+                            return {'predicted_direction': 'unknown', 'confidence': 0}
+                    
+                    # Cache for future use
+                    self.universal_lstm_model = model
+                    self.universal_lstm_scaler = scaler
+                else:
+                    # Use cached universal model
+                    model = self.universal_lstm_model
+                    scaler = self.universal_lstm_scaler
                 
-        except ImportError:
-            # Si el módulo de integración LSTM no está disponible, usar la implementación original
-            logger.warning(f"Módulo lstm.integration no disponible, usando implementación LSTM antigua para {symbol}")
+                logger.info(f"Using universal LSTM model for {symbol}")
             
-            # Implementación original simplificada (fallback)
-            # Esta es una versión reducida del método original que sirve como respaldo
-            if data is None or data.empty:
-                data = self.get_market_data(symbol)
-                
-            if data.empty:
+            # Prepare data for prediction
+            # 1. Ensure we have all needed technical indicators
+            if 'RSI_14' not in data.columns:
+                data = calculate_technical_indicators(data, include_all=True)
+                data = calculate_trend_indicator(data)
+                data = normalize_indicators(data)
+            
+            # 2. Get normalized features
+            feature_cols = [col for col in data.columns if col.endswith('_norm')]
+            
+            # 3. Ensure close_norm is included
+            if 'close_norm' not in feature_cols and 'close_norm' in data.columns:
+                feature_cols.append('close_norm')
+            
+            # 4. Check if we have enough data
+            seq_length = 60  # This should match the training seq_length
+            if len(data) < seq_length:
+                logger.warning(f"Not enough data for {symbol}, need at least {seq_length} periods")
                 return {'predicted_direction': 'unknown', 'confidence': 0}
             
-            # Extraer tendencia básica de los datos
-            if len(data) >= 5:
-                recent_trend = data['close'].iloc[-1] / data['close'].iloc[-5] - 1
-                if recent_trend > 0.01:
-                    return {'predicted_direction': 'up', 'confidence': min(1.0, recent_trend * 10)}
-                elif recent_trend < -0.01:
-                    return {'predicted_direction': 'down', 'confidence': min(1.0, abs(recent_trend) * 10)}
+            # 5. Check feature count compatibility
+            expected_features = 41  # The number of features used during training
+            current_features = len(feature_cols)
             
-            return {'predicted_direction': 'neutral', 'confidence': 0}
+            # Log feature counts for debugging
+            logger.info(f"Model expects {expected_features} features, found {current_features} features")
             
+            # If we don't have the exact number of features needed, adjust our features
+            if current_features != expected_features:
+                logger.warning(f"Feature count mismatch: expected {expected_features}, got {current_features}")
+                
+                # Option 1: Add missing features with default values if we have fewer than expected
+                if current_features < expected_features:
+                    missing_count = expected_features - current_features
+                    logger.info(f"Adding {missing_count} placeholder features with default values")
+                    # Add placeholder columns with 0.5 (neutral value)
+                    for i in range(missing_count):
+                        placeholder_name = f"placeholder_{i}_norm"
+                        data[placeholder_name] = 0.5
+                        feature_cols.append(placeholder_name)
+                
+                # Option 2: Select only the most important features if we have more than expected
+                elif current_features > expected_features:
+                    logger.info(f"Selecting {expected_features} most important features from {current_features}")
+                    # Ensure we keep close_norm as it's the primary target
+                    essential_features = ['close_norm']
+                    # Add other important features 
+                    important_features = [
+                        'TrendStrength_norm', 'RSI_14_norm', 'EMA_8_norm', 'EMA_21_norm', 'SMA_34_norm',
+                        'MACD_diff_norm', 'MACD_line_norm', 'MACD_signal_norm', 'ATR_14_norm',
+                        'Stoch_k_norm', 'Stoch_d_norm', 'BB_Width_norm', 'ADX_14_norm',
+                        'volume_norm', 'OBV_norm'
+                    ]
+                    
+                    # Ensure these features exist in the data
+                    available_important = [f for f in important_features if f in feature_cols]
+                    
+                    # Combine essential and important features
+                    selected_features = essential_features + available_important
+                    
+                    # If we still need more features, add remaining ones until we reach expected count
+                    remaining_features = [f for f in feature_cols if f not in selected_features]
+                    needed_count = expected_features - len(selected_features)
+                    if needed_count > 0 and len(remaining_features) > 0:
+                        additional_features = remaining_features[:needed_count]
+                        selected_features.extend(additional_features)
+                    
+                    # If we still don't have enough, add placeholder features
+                    if len(selected_features) < expected_features:
+                        missing_count = expected_features - len(selected_features)
+                        for i in range(missing_count):
+                            placeholder_name = f"placeholder_{i}_norm"
+                            data[placeholder_name] = 0.5
+                            selected_features.append(placeholder_name)
+                    
+                    # Trim to expected count if we have too many
+                    feature_cols = selected_features[:expected_features]
+                    
+                logger.info(f"Adjusted feature count: {len(feature_cols)}")
+            
+            # 6. Extract the last sequence
+            sequence = data[feature_cols].values[-seq_length:]
+            
+            # 7. Reshape for model input
+            X = np.array([sequence])
+            
+            # 8. Make prediction
+            prediction = model.predict(X, verbose=0)[0][0]
+            
+            # 9. Get the current normalized close and determine if prediction is higher or lower
+            current_close_norm = data['close_norm'].iloc[-1]
+            current_close = data['close'].iloc[-1]
+            
+            # 10. Determine direction and confidence
+            if prediction > current_close_norm:
+                direction = 'up'
+                confidence = min(1.0, (prediction - current_close_norm) * 10)  # Scale difference to confidence
+            elif prediction < current_close_norm:
+                direction = 'down'
+                confidence = min(1.0, (current_close_norm - prediction) * 10)  # Scale difference to confidence
+            else:
+                direction = 'neutral'
+                confidence = 0.0
+            
+            # 11. Calculate predicted price using percentage-based approach
+            # Get recent volatility as a guide
+            atr = data['ATR_14'].iloc[-1] if 'ATR_14' in data.columns else current_close * 0.01
+            price_volatility = atr / current_close  # Normalized volatility
+            
+            # Base expected change on confidence and volatility
+            volatility_factor = 5  # Multiplier for volatility (can be tuned)
+            expected_pct_change = confidence * price_volatility * volatility_factor
+            
+            # Limit to reasonable change (e.g., maximum 2% per period)
+            max_pct_change = 0.02
+            expected_pct_change = min(expected_pct_change, max_pct_change)
+            
+            # Calculate predicted price
+            if direction == 'up':
+                predicted_price = current_close * (1 + expected_pct_change)
+            elif direction == 'down':
+                predicted_price = current_close * (1 - expected_pct_change)
+            else:
+                predicted_price = current_close
+            
+            # 12. Prepare result
+            result = {
+                'predicted_direction': direction,
+                'predicted_value_norm': float(prediction),
+                'current_value_norm': float(current_close_norm),
+                'confidence': float(confidence),
+                'current_price': float(current_close),
+                'predicted_price': float(predicted_price),
+                'price_change': float(predicted_price - current_close),
+                'price_change_pct': float((predicted_price / current_close - 1) * 100),
+                'model_type': 'symbol_specific' if symbol_specific else 'universal',
+                'timestamp': datetime.datetime.now().isoformat()
+            }
+            
+            return result
+                
         except Exception as e:
-            logger.error(f"Error en la predicción LSTM para {symbol}: {e}")
+            logger.error(f"Error predicting with LSTM for {symbol}: {e}")
             return {'predicted_direction': 'error', 'confidence': 0, 'error': str(e)}
-    
 
         
 

@@ -351,6 +351,7 @@ class LSTMService:
 
 # Helper functions for easy access to LSTM service
 
+# Modificamos get_lstm_service para crear una instancia de IBKR dedicada para el servicio
 def get_lstm_service(config_path: str = None, ibkr_interface = None) -> LSTMService:
     """
     Get the LSTM service singleton instance.
@@ -362,6 +363,8 @@ def get_lstm_service(config_path: str = None, ibkr_interface = None) -> LSTMServ
     Returns:
         LSTMService: LSTM service instance
     """
+    # Si no se proporciona una interfaz IBKR, no creamos una nueva
+    # El servicio creará las interfaces específicas para cada worker
     return LSTMService(config_path, ibkr_interface)
 
 def predict_with_lstm(symbol: str, data: pd.DataFrame = None, ibkr_interface = None) -> Dict:
@@ -378,8 +381,22 @@ def predict_with_lstm(symbol: str, data: pd.DataFrame = None, ibkr_interface = N
     Returns:
         dict: Prediction result
     """
-    service = get_lstm_service(ibkr_interface=ibkr_interface)
-    return service.predict_price(symbol, data, ibkr_interface)
+    # Si hay datos proporcionados directamente, no necesitamos una interfaz IBKR
+    # dedicada para predicciones, ya que solo la usaríamos para obtener datos
+    if data is not None:
+        service = get_lstm_service()
+        return service.predict_price(symbol, data)
+    
+    # Si no hay datos y necesitamos obtenerlos a través de IBKR
+    if ibkr_interface is not None:
+        service = get_lstm_service(ibkr_interface=ibkr_interface)
+        return service.predict_price(symbol, data, ibkr_interface)
+    
+    # Si no hay datos ni interfaz, fallar elegantemente
+    return {
+        'status': 'error',
+        'message': 'Either data or ibkr_interface must be provided'
+    }
 
 def request_model_training(symbol: str, priority: int = 50) -> bool:
     """

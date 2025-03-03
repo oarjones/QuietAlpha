@@ -35,6 +35,7 @@ ENV/
 *.odt
 
 # Project specific
+plots/
 data/raw/*
 data/processed/*
 models/*.h5
