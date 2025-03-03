@@ -38,6 +38,7 @@ ENV/
 plots/
 data/raw/*
 data/processed/*
+models/
 models/*.h5
 models/*.keras
 models/*.pkl
