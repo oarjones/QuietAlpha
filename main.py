@@ -17,7 +17,6 @@ from typing import Dict, List
 from portfolio_manager.base import PortfolioManager
 from portfolio_manager.xgboost_manager import XGBoostPortfolioManager
 from trading_manager.base import TradingManager
-from trading_manager.rl_trading_manager import RLTradingManager
 
 # Import LSTM-enhanced components
 from portfolio_manager.lstm_enhanced_manager import LSTMEnhancedPortfolioManager
@@ -134,8 +133,7 @@ class QuietAlphaTradingBot:
         tm_type = self.config.get('trading_manager_type', 'base')
         
         if tm_type == 'rl':
-            logger.info("Initializing RL Trading Manager")
-            return RLTradingManager(config_path=self.config_path, ibkr_interface=self.ibkr)
+            logger.info("RL Trading Manager not implemented")
         else:
             logger.info("Initializing Base Trading Manager")
             return TradingManager(config_path=self.config_path, ibkr_interface=self.ibkr)
@@ -217,10 +215,7 @@ class QuietAlphaTradingBot:
                 return {'status': 'warning', 'message': 'No symbols in portfolio'}
             
             # Use Trading Manager to run trading cycle
-            if isinstance(self.trading_manager, RLTradingManager):
-                cycle_result = self.trading_manager.run_trading_cycle_rl(symbols)
-            else:
-                cycle_result = self.trading_manager.run_trading_cycle(symbols)
+            cycle_result = self.trading_manager.run_trading_cycle(symbols)
             
             self.last_trading_cycle = datetime.datetime.now()
             
@@ -315,11 +310,8 @@ class QuietAlphaTradingBot:
             
             results['portfolio_manager'] = pm_result
             
-            # Train Trading Manager if it's RL-based
-            if isinstance(self.trading_manager, RLTradingManager):
-                logger.info("Training RL Trading Manager")
-                tm_result = self.trading_manager.train_rl_model()
-                results['trading_manager'] = tm_result
+            # Train Trading Manager if it's RL-based (not implemented)
+            
             
             logger.info("Model training completed")
             return results

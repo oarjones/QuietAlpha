@@ -519,7 +519,7 @@ class LSTMTrainer:
                     return self._fresh_training(symbol, config, ibkr)
             else:
                 logger.info(f"No existing model for {symbol}, doing fresh training")
-                return self._fresh_training(symbol, config, ibkr)
+                return self._initial_training(symbol, config, ibkr)
                 
         except Exception as e:
             logger.error(f"Error in train_lstm_model for {symbol}: {e}")
@@ -646,6 +646,127 @@ class LSTMTrainer:
                 'status': 'error',
                 'message': str(e)
             }
+        
+
+    def _initial_training(self, symbol: str, config: Dict, ibkr_interface: IBKRInterface = None) -> Dict:
+        """
+        Train a new LSTM model from scratch.
+        
+        Args:
+            symbol: Symbol to train
+            config: Training configuration
+            ibkr_interface: Dedicated IBKR interface for this training task
+            
+        Returns:
+            dict: Training results
+        """
+        try:
+            logger.info(f"Starting fresh training for {symbol}")
+            
+            # Use provided IBKR interface or the default one
+            ibkr = ibkr_interface or self.ibkr
+            
+            # Fetch historical data
+            df = fetch_historical_data(ibkr, symbol, lookback_days=730)
+            
+            if df.empty:
+                return {
+                    'status': 'error',
+                    'message': f'No data fetched for {symbol}'
+                }
+            
+            # Check if we have enough data
+            if len(df) < self.min_training_data_days * 5:  # Assuming ~5 bars per day for 1h timeframe
+                return {
+                    'status': 'error',
+                    'message': f'Insufficient data for {symbol}: {len(df)} bars, need at least {self.min_training_data_days * 5}'
+                }
+            
+            # Preprocess data
+            symbol_dir = self.model_manager.get_symbol_dir(symbol)
+            processed_dir = os.path.join(self.data_dir, "processed")
+            
+            X_train, y_train, X_test, y_test, scaler, feature_cols, train_df, test_df = preprocess_data(
+                df, 
+                symbol, 
+                seq_length=config['seq_length'],
+                train_split=0.8,
+                output_dir=processed_dir
+            )
+            
+            # Build model
+            input_shape = (X_train.shape[1], X_train.shape[2])
+            model = build_lstm_model(input_shape, config)
+            
+            # Train model
+            history = train_model(model, X_train, y_train, X_test, y_test, config)
+            
+            # Evaluate model
+            rmse, mae, r2, y_test_true, y_test_pred = evaluate_model(
+                model, X_test, y_test, scaler, X_test
+            )
+            
+            # Calculate reliability index (0-1)
+            # Higher is better
+            price_accuracy = max(0, min(1, 1 - (rmse / df['close'].mean())))
+            direction_accuracy = self._calculate_direction_accuracy(y_test_true, y_test_pred)
+            reliability_index = (price_accuracy * 0.7) + (direction_accuracy * 0.3)
+            
+            # Prepare metrics
+            metrics = {
+                'rmse': float(rmse),
+                'mae': float(mae),
+                'r2': float(r2),
+                'direction_accuracy': float(direction_accuracy),
+                'price_accuracy': float(price_accuracy),
+                'train_size': len(train_df),
+                'test_size': len(test_df)
+            }
+            
+            # Save model and scaler
+            model_path = self.model_manager.get_model_path(symbol)
+            scaler_path = self.model_manager.get_scaler_path(symbol)
+            
+            # Save model
+            ke.saving.save_model(model, model_path)
+            joblib.dump(scaler, scaler_path)
+            
+            # Save metadata
+            metadata = {
+                'trained_date': datetime.now().isoformat(),
+                'symbol': symbol,
+                'metrics': metrics,
+                'reliability_index': reliability_index,
+                'feature_cols': feature_cols,
+                'config': {k: v for k, v in config.items() if k != 'label'},
+                'training_data': {
+                    'start_date': train_df['datetime'].min().isoformat() if 'datetime' in train_df else '',
+                    'end_date': test_df['datetime'].max().isoformat() if 'datetime' in test_df else '',
+                    'rows': len(df)
+                }
+            }
+            
+            self.model_manager.save_model_metadata(symbol, metadata)
+            
+            logger.info(f"Fresh training completed for {symbol}: RMSE={rmse:.4f}, R²={r2:.4f}, Reliability={reliability_index:.4f}")
+            
+            return {
+                'status': 'success',
+                'method': 'fresh',
+                'metrics': metrics,
+                'reliability_index': reliability_index,
+                'model_path': model_path,
+                'scaler_path': scaler_path,
+                'metadata_path': self.model_manager.get_metadata_path(symbol)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in fresh training for {symbol}: {e}")
+            return {
+                'status': 'error',
+                'message': str(e)
+            }
+        
     
     def _incremental_training(self, symbol: str, config: Dict, ibkr_interface: IBKRInterface = None) -> Dict:
         """

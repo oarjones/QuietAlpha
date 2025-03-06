@@ -33,8 +33,11 @@ ENV/
 *.swp
 *.swo
 *.odt
+*.log
+*.csv
 
 # Project specific
+backtesting/
 plots/
 data/raw/*
 data/processed/*
