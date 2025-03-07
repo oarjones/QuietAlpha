@@ -1,9 +1,9 @@
 """
-RL Trading Manager Implementation
+RL Trading Manager Implementation - Optimized Version
 
-This module implements a Trading Manager using Reinforcement Learning (RL)
-to make trading decisions. It uses a Proximal Policy Optimization (PPO)
-agent to learn optimal trading strategies from market data and execution results.
+This module implements a Trading Manager using Reinforcement Learning (PPO)
+for making trading decisions, with an improved reward structure, action handling,
+and enhanced logging.
 """
 
 import os
@@ -22,6 +22,11 @@ from trading_manager.base import TradingManager
 from data.processing import calculate_technical_indicators, normalize_indicators, calculate_trend_indicator
 from utils.data_utils import load_config
 
+# Configure logging with more detail
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 class TradingEnvironment(gym.Env):
@@ -56,7 +61,7 @@ class TradingEnvironment(gym.Env):
         self.position = 0
         self.current_step = 0
         self.current_price = 0
-        self.last_trade_price = 0
+        self.avg_entry_price = 0  # Track average entry price for P&L calculation
         self.trades = []
         self.portfolio_value = initial_balance
         self.done = False
@@ -89,11 +94,16 @@ class TradingEnvironment(gym.Env):
         # Trading session stats
         self.total_trades = 0
         self.winning_trades = 0
+        self.losing_trades = 0
         self.max_drawdown = 0
         self.peak_portfolio_value = initial_balance
+        self.trade_history = []
         
         # Reset on init
         self.reset()
+        
+        logger.info(f"TradingEnvironment initialized with {len(data)} data points, "
+                   f"initial balance: {initial_balance}, max position: {max_position}")
     
     def reset(self, seed=None):
         """
@@ -110,7 +120,7 @@ class TradingEnvironment(gym.Env):
         self.position = 0
         self.current_step = 0
         self.current_price = self.data['close'].iloc[0]
-        self.last_trade_price = 0
+        self.avg_entry_price = 0
         self.trades = []
         self.portfolio_value = self.initial_balance
         self.done = False
@@ -118,8 +128,13 @@ class TradingEnvironment(gym.Env):
         # Reset statistics
         self.total_trades = 0
         self.winning_trades = 0
+        self.losing_trades = 0
         self.max_drawdown = 0
         self.peak_portfolio_value = self.initial_balance
+        self.trade_history = []
+        
+        # Log reset
+        logger.debug(f"Environment reset: balance={self.balance}, position={self.position}")
         
         # Get initial observation
         observation = self._get_observation()
@@ -156,6 +171,11 @@ class TradingEnvironment(gym.Env):
         # Calculate portfolio value before action
         portfolio_value_before = self.balance + self.position * self.current_price
         
+        # Log current state
+        logger.debug(f"Step {self.current_step}: price={self.current_price:.2f}, "
+                   f"position={self.position}, balance={self.balance:.2f}, "
+                   f"portfolio={portfolio_value_before:.2f}")
+        
         # Process the action to determine position delta and risk parameters
         position_delta_pct = action[0]  # Between -1 and 1
         stop_loss_pct = action[1]       # Between 0 and 0.1
@@ -191,6 +211,25 @@ class TradingEnvironment(gym.Env):
             
             # Execute trade if there's any position change
             if actual_position_delta != 0:
+                # Update average entry price for P&L calculation
+                if (self.position > 0 and actual_position_delta > 0) or (self.position < 0 and actual_position_delta < 0):
+                    # Adding to existing position, update average price
+                    total_position = abs(self.position) + abs(actual_position_delta)
+                    if total_position > 0:  # Avoid division by zero
+                        self.avg_entry_price = (
+                            (abs(self.position) * self.avg_entry_price + 
+                            abs(actual_position_delta) * self.current_price) / total_position
+                        )
+                elif (self.position > 0 and actual_position_delta < 0) or (self.position < 0 and actual_position_delta > 0):
+                    # Reducing or closing position, keep average price
+                    # If position direction changes, reset average price
+                    if self.position * new_position <= 0:  # Change in direction or close to zero
+                        if new_position != 0:
+                            self.avg_entry_price = self.current_price
+                else:
+                    # New position from zero
+                    self.avg_entry_price = self.current_price
+                
                 # Update balance
                 self.balance -= trade_value + trade_cost
                 
@@ -198,29 +237,30 @@ class TradingEnvironment(gym.Env):
                 self.position = new_position
                 
                 # Record trade
-                self.last_trade_price = self.current_price
-                self.trades.append({
+                trade_record = {
                     'step': self.current_step,
                     'price': self.current_price,
                     'position_delta': actual_position_delta,
                     'position': self.position,
                     'cost': trade_cost,
                     'stop_loss_pct': stop_loss_pct,
-                    'take_profit_pct': take_profit_pct
-                })
+                    'take_profit_pct': take_profit_pct,
+                    'avg_entry_price': self.avg_entry_price,
+                    'balance': self.balance
+                }
+                self.trades.append(trade_record)
+                self.trade_history.append(trade_record)
 
-                # Log progress every 50 steps
+                # Log trade for better visibility (every 50 steps)
                 if self.current_step % 50 == 0:
                     logger.info(f"Step {self.current_step}: "
                                 f"price={self.current_price:.2f}, "
-                                f"position_delta={actual_position_delta:.2f}, " 
+                                f"position_delta={actual_position_delta}, " 
                                 f"position={self.position}, "
+                                f"avg_entry={self.avg_entry_price:.2f}, "
                                 f"cost={trade_cost:.2f}, "
                                 f"stop_loss_pct={stop_loss_pct:.2f}, "
-                                f"take_profit_pct={take_profit_pct:.2f}, "
-                                f"cumulative_reward={self.portfolio_value - self.initial_balance:.2f}"
-                                )
-                
+                                f"take_profit_pct={take_profit_pct:.2f}")
                 
                 self.total_trades += 1
         
@@ -234,56 +274,83 @@ class TradingEnvironment(gym.Env):
         hit_stop_loss = False
         hit_take_profit = False
         
-        if self.position != 0 and self.last_trade_price > 0:
-            # Calculate price change since last trade
-            price_change_pct = (next_price - self.last_trade_price) / self.last_trade_price
+        if self.position != 0 and self.avg_entry_price > 0:
+            # Calculate price change since entry
+            price_change_pct = (next_price - self.avg_entry_price) / self.avg_entry_price
             
-            # Check for stop loss (for both long and short positions)
-            if (self.position > 0 and price_change_pct <= -stop_loss_pct) or \
-            (self.position < 0 and price_change_pct >= stop_loss_pct):
+            # For short positions, negate the percentage
+            if self.position < 0:
+                price_change_pct = -price_change_pct
+            
+            # Check for stop loss
+            if price_change_pct <= -stop_loss_pct:
                 hit_stop_loss = True
+                logger.debug(f"Hit stop loss: price={next_price:.2f}, entry={self.avg_entry_price:.2f}, "
+                           f"change={price_change_pct:.2%}, limit={-stop_loss_pct:.2%}")
             
-            # Check for take profit (for both long and short positions)
-            if (self.position > 0 and price_change_pct >= take_profit_pct) or \
-            (self.position < 0 and price_change_pct <= -take_profit_pct):
+            # Check for take profit
+            if price_change_pct >= take_profit_pct:
                 hit_take_profit = True
+                logger.debug(f"Hit take profit: price={next_price:.2f}, entry={self.avg_entry_price:.2f}, "
+                           f"change={price_change_pct:.2%}, limit={take_profit_pct:.2%}")
         
         # If we hit stop loss or take profit, close the position
         if (hit_stop_loss or hit_take_profit) and self.position != 0:
             # Calculate trade cost
             trade_cost = abs(self.position) * next_price * self.trade_cost_pct
             
-            # Calculate trade value
-            trade_value = -self.position * next_price
+            # Calculate P&L from this trade
+            position_value = self.position * next_price
+            entry_value = self.position * self.avg_entry_price
+            profit_loss = position_value - entry_value
+            
+            # For short positions, reverse the P&L calculation
+            if self.position < 0:
+                profit_loss = -profit_loss
             
             # Execute trade
-            self.balance -= trade_value + trade_cost
+            self.balance += position_value - trade_cost
             
-            # Calculate P&L for this trade
-            if self.last_trade_price > 0:
-                price_change = next_price - self.last_trade_price
-                
-                # Para posiciones largas, ganamos si el precio sube
-                if (self.position > 0 and price_change > 0) or \
-                (self.position < 0 and price_change < 0):
-                    self.winning_trades += 1
-                    
             # Record trade
             exit_reason = 'stop_loss' if hit_stop_loss else 'take_profit'
-            self.trades.append({
+            trade_record = {
                 'step': self.current_step,
                 'price': next_price,
                 'position_delta': -self.position,
                 'position': 0,
                 'cost': trade_cost,
-                'reason': exit_reason
-            })
+                'reason': exit_reason,
+                'profit_loss': profit_loss,
+                'balance': self.balance
+            }
+            self.trades.append(trade_record)
+            self.trade_history.append(trade_record)
             
-            # Reset position
+            # Update win/loss stats
+            if profit_loss > 0:
+                self.winning_trades += 1
+            else:
+                self.losing_trades += 1
+            
+            logger.debug(f"Closed position at {next_price:.2f} due to {exit_reason}, "
+                       f"P&L: {profit_loss:.2f}, position was {self.position}")
+            
+            # Reset position and entry price
             self.position = 0
-            self.last_trade_price = 0
+            self.avg_entry_price = 0
             
             self.total_trades += 1
+        
+        # Calculate current P&L from open position
+        open_position_pnl = 0
+        if self.position != 0 and self.avg_entry_price > 0:
+            position_value = self.position * next_price
+            entry_value = self.position * self.avg_entry_price
+            open_position_pnl = position_value - entry_value
+            
+            # For short positions, reverse the P&L calculation
+            if self.position < 0:
+                open_position_pnl = -open_position_pnl
         
         # Calculate portfolio value after action
         self.portfolio_value = self.balance + self.position * next_price
@@ -292,16 +359,22 @@ class TradingEnvironment(gym.Env):
         if self.portfolio_value > self.peak_portfolio_value:
             self.peak_portfolio_value = self.portfolio_value
         
-        current_drawdown = (self.peak_portfolio_value - self.portfolio_value) / self.peak_portfolio_value
+        current_drawdown = 0
+        if self.peak_portfolio_value > 0:  # Avoid division by zero
+            current_drawdown = (self.peak_portfolio_value - self.portfolio_value) / self.peak_portfolio_value
         self.max_drawdown = max(self.max_drawdown, current_drawdown)
         
         # Calculate reward
-        reward = self._calculate_reward(portfolio_value_before)
+        reward = self._calculate_reward(portfolio_value_before, open_position_pnl)
         
         # Check if we're done
         self.done = self.current_step >= len(self.data) - 1
         
-        return self._get_observation(), reward, self.done, False, self._get_info()
+        # Return results
+        next_observation = self._get_observation()
+        info = self._get_info()
+        
+        return next_observation, reward, self.done, False, info
     
     def _get_observation(self):
         """
@@ -319,7 +392,7 @@ class TradingEnvironment(gym.Env):
         # Normalize position to [-1, 1]
         normalized_position = self.position / self.max_position
         
-        # Normalize balance
+        # Normalize balance relative to initial balance
         normalized_balance = self.balance / self.initial_balance - 1.0
         
         # Combine features with position and balance
@@ -327,52 +400,93 @@ class TradingEnvironment(gym.Env):
         
         return obs.astype(np.float32)
     
-    
     def _get_info(self):
         """
         Get additional information about the environment.
+        
+        Returns:
+            dict: Information about the current state
         """
+        # Calculate win rate
+        win_rate = 0
+        if self.total_trades > 0:
+            win_rate = self.winning_trades / self.total_trades
+        
+        # Calculate portfolio change
+        portfolio_change = (self.portfolio_value - self.initial_balance) / self.initial_balance
+        
         return {
             'portfolio_value': self.portfolio_value,
             'balance': self.balance,
             'position': self.position,
             'current_price': self.current_price,
             'current_step': self.current_step,
-            'total_trades': max(1, self.total_trades),  # Evitar división por cero
+            'total_trades': max(1, self.total_trades),  # Avoid division by zero
             'winning_trades': self.winning_trades,
-            'win_rate': self.winning_trades / max(1, self.total_trades),
-            'max_drawdown': self.max_drawdown
+            'losing_trades': self.losing_trades,
+            'win_rate': win_rate,
+            'max_drawdown': self.max_drawdown,
+            'portfolio_change': portfolio_change,
+            'avg_entry_price': self.avg_entry_price
         }
     
-    def _calculate_reward(self, previous_portfolio_value):
-        # Recompensa principal: cambio porcentual en el portfolio
+    def _calculate_reward(self, previous_portfolio_value, open_position_pnl):
+        """
+        Calculate the reward for the current step.
+        
+        Args:
+            previous_portfolio_value: Portfolio value before the action
+            open_position_pnl: Current P&L from open position
+            
+        Returns:
+            float: Reward value
+        """
+        # 1. Portfolio value change - primary reward component
         portfolio_return = (self.portfolio_value - previous_portfolio_value) / previous_portfolio_value
         
-        # Escalar el retorno para que sea significativo, pero no aplastando los retornos negativos
+        # Scale portfolio return for more meaningful reward values (but asymmetrically)
         if portfolio_return > 0:
-            scaled_return = portfolio_return * 10.0  # Valores más razonables
+            portfolio_reward = portfolio_return * 10.0  # Positive returns get amplified
         else:
-            scaled_return = portfolio_return * 5.0   # Menos penalización por pérdidas
+            portfolio_reward = portfolio_return * 5.0   # Negative returns are less penalized
         
-        # Bonificación por mantener efectivo en mercados bajistas
-        current_trend = 0
-        if hasattr(self, 'data') and 'TrendStrength_norm' in self.data.columns:
-            current_idx = min(self.current_step, len(self.data) - 1)
-            current_trend = self.data['TrendStrength_norm'].iloc[current_idx]
+        # 2. Reward for good position management
+        position_reward = 0
         
-        # Bonificaciones más pequeñas para no dominar el retorno del portfolio
-        cash_bonus = 0.1 if current_trend < 0.4 and self.position == 0 else 0
-        position_bonus = 0.1 if current_trend > 0.6 and self.position > 0 else 0
+        # Get trend information from data
+        if 'TrendStrength_norm' in self.data.columns:
+            trend_strength = self.data['TrendStrength_norm'].iloc[self.current_step]
+            
+            # Reward for being in the right direction during strong trends
+            # For bullish trend (>0.6), reward long positions
+            if trend_strength > 0.6 and self.position > 0:
+                position_reward += 0.1
+            # For bearish trend (<0.4), reward short positions
+            elif trend_strength < 0.4 and self.position < 0:
+                position_reward += 0.1
+            # For neutral trend, reward less exposure
+            elif 0.4 <= trend_strength <= 0.6 and abs(self.position) < self.max_position / 4:
+                position_reward += 0.05
         
-        # Penalización menos severa por drawdown
-        drawdown_penalty = max(0, (self.max_drawdown - 0.1) * 5.0)
+        # 3. Penalize for high drawdown beyond acceptable levels (5%)
+        drawdown_penalty = max(0, (self.max_drawdown - 0.05) * 5.0) if self.max_drawdown > 0.05 else 0
         
-        # Recompensa final
-        reward = scaled_return + cash_bonus + position_bonus - drawdown_penalty
+        # 4. Small bonus for profitability
+        profitability_bonus = 0.1 if self.portfolio_value > self.initial_balance else 0
         
-        # Pequeña bonificación adicional por portfolio positivo
-        if self.portfolio_value > self.initial_balance:
-            reward += 0.1
+        # 5. Penalize excessive trading (optional)
+        excessive_trading_penalty = 0
+        if self.total_trades > 20:  # Arbitrary threshold for excessive trading
+            excessive_trading_penalty = min(0.2, (self.total_trades - 20) * 0.01)
+        
+        # Combine all reward components
+        reward = portfolio_reward + position_reward - drawdown_penalty + profitability_bonus - excessive_trading_penalty
+        
+        # Log reward details occasionally for debugging
+        if self.current_step % 100 == 0 or self.done:
+            logger.debug(f"Reward components: portfolio={portfolio_reward:.4f}, position={position_reward:.4f}, "
+                       f"drawdown_penalty={drawdown_penalty:.4f}, profit_bonus={profitability_bonus:.4f}, "
+                       f"trading_penalty={excessive_trading_penalty:.4f}, total={reward:.4f}")
         
         return reward
 
@@ -397,15 +511,13 @@ class PPOAgent:
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.save_path = save_path
-
-        
         
         # Ensure save path exists
         os.makedirs(save_path, exist_ok=True)
         
         # Hyperparameters
-        self.actor_lr = 0.0005
-        self.critic_lr = 0.001
+        self.actor_lr = 0.0003
+        self.critic_lr = 0.0007
         self.gamma = 0.99
         self.gae_lambda = 0.95
         self.clip_ratio = 0.2
@@ -414,12 +526,12 @@ class PPOAgent:
         self.initial_entropy_coef = 0.1
         self.final_entropy_coef = 0.01
         self.entropy_coef = self.initial_entropy_coef
-        self.entropy_decay_episodes = 50
+        self.entropy_decay_episodes = 100
         
         # Build networks
         self.actor, self.critic = self._build_networks()
         
-        # Optimizer
+        # Optimizers
         self.actor_optimizer = tf.keras.optimizers.Adam(learning_rate=self.actor_lr)
         self.critic_optimizer = tf.keras.optimizers.Adam(learning_rate=self.critic_lr)
         
@@ -438,12 +550,23 @@ class PPOAgent:
             'critic_loss': [],
             'entropy': [],
             'episode_returns': [],
-            'episode_lengths': []
+            'episode_lengths': [],
+            'win_rates': []
         }
+        
+        logger.info(f"PPOAgent initialized with state_dim={state_dim}, action_dim={action_dim}")
     
     def _build_networks(self):
+        """
+        Build actor and critic networks.
+        
+        Returns:
+            tuple: (actor_model, critic_model)
+        """
         # Actor network - policy network
         actor_inputs = tf.keras.Input(shape=(self.state_dim,))
+        
+        # Use larger networks for better expressivity
         x = tf.keras.layers.Dense(512, activation='relu')(actor_inputs)
         x = tf.keras.layers.Dense(256, activation='relu')(x)
         x = tf.keras.layers.Dense(128, activation='relu')(x)
@@ -453,7 +576,7 @@ class PPOAgent:
         
         # Actor also outputs log standard deviations
         log_stds = tf.keras.layers.Dense(self.action_dim, activation='tanh')(x)
-        log_stds = tf.keras.layers.Lambda(lambda x: x * 0.5 - 2.0)(log_stds)  # Valores iniciales más pequeños
+        log_stds = tf.keras.layers.Lambda(lambda x: x * 0.5 - 2.0)(log_stds)  # Smaller initial values
         
         actor = tf.keras.Model(inputs=actor_inputs, outputs=[action_means, log_stds])
         
@@ -465,6 +588,10 @@ class PPOAgent:
         critic_outputs = tf.keras.layers.Dense(1)(x)
         
         critic = tf.keras.Model(inputs=critic_inputs, outputs=critic_outputs)
+        
+        # Log model summaries
+        actor.summary(print_fn=logger.info if logger.isEnabledFor(logging.DEBUG) else None)
+        critic.summary(print_fn=logger.info if logger.isEnabledFor(logging.DEBUG) else None)
         
         return actor, critic
     
@@ -500,7 +627,7 @@ class PPOAgent:
         action = tf.tanh(action)
         
         # Compute log probability
-        # Using a simplified version for now
+        # Using a simplified approximation for the log probability calculation
         log_prob = -0.5 * tf.reduce_sum(tf.square((action - action_mean) / (std + 1e-8)))
         
         return action[0].numpy(), log_prob.numpy()
@@ -645,6 +772,7 @@ class PPOAgent:
         
         Args:
             batch_size: Training batch size
+            episode: Current episode number (for entropy decay)
             
         Returns:
             dict: Training metrics
@@ -654,7 +782,7 @@ class PPOAgent:
         actions = np.array(self.actions)
         old_log_probs = np.array(self.log_probs)
 
-        # Actualizar coeficiente de entropía
+        # Update entropy coefficient for exploration
         if episode < self.entropy_decay_episodes:
             self.entropy_coef = self.initial_entropy_coef - (self.initial_entropy_coef - self.final_entropy_coef) * (episode / self.entropy_decay_episodes)
         else:
@@ -688,7 +816,6 @@ class PPOAgent:
         critic_losses = []
         entropies = []
         
-        
         # Multiple epochs of training
         for _ in range(self.policy_update_epochs):
             for batch in dataset:
@@ -717,6 +844,10 @@ class PPOAgent:
         self.metrics['critic_loss'].append(avg_critic_loss)
         self.metrics['entropy'].append(avg_entropy)
         
+        # Log training metrics
+        logger.info(f"Training metrics - Actor loss: {avg_actor_loss:.6f}, Critic loss: {avg_critic_loss:.6f}, "
+                   f"Entropy: {avg_entropy:.6f}, Entropy coef: {self.entropy_coef:.4f}")
+        
         # Clear buffer after training
         self.clear_buffer()
         
@@ -737,7 +868,7 @@ class PPOAgent:
             # Create directory if it doesn't exist
             os.makedirs(self.save_path, exist_ok=True)
             
-            # Define filenames with correct .weights.h5 extension
+            # Define filenames
             if episode is not None:
                 actor_path = os.path.join(self.save_path, f'actor_episode_{episode}.weights.h5')
                 critic_path = os.path.join(self.save_path, f'critic_episode_{episode}.weights.h5')
@@ -837,6 +968,8 @@ class RLTradingManager(TradingManager):
         
         # Initialize RL components
         self._initialize_rl()
+        
+        logger.info("RL Trading Manager initialized")
     
     def _initialize_rl(self):
         """Initialize the RL environment and agent."""
@@ -849,23 +982,35 @@ class RLTradingManager(TradingManager):
         
         Args:
             data (pd.DataFrame): Historical data with technical indicators
+            
+        Returns:
+            bool: Success status
         """
         if data is None or data.empty:
             logger.error("Cannot initialize RL with empty data")
             return False
         
         try:
+            # Log data info
+            logger.info(f"Initializing RL with data: {len(data)} samples, {len(data.columns)} features")
+            
             # Initialize environment
+            initial_balance = self.rl_config.get('initial_balance', 10000.0)
+            max_position = self.rl_config.get('max_position', 100)
+            transaction_fee = self.rl_config.get('transaction_fee', 0.0005)
+            
             self.env = TradingEnvironment(
                 data=data,
-                initial_balance=self.rl_config.get('initial_balance', 10000.0),
-                max_position=self.rl_config.get('max_position', 100),
-                transaction_fee=self.rl_config.get('transaction_fee', 0.0005)
+                initial_balance=initial_balance,
+                max_position=max_position,
+                transaction_fee=transaction_fee
             )
             
             # Get state and action dimensions
             state_dim = self.env.observation_space.shape[0]
             action_dim = self.env.action_space.shape[0]
+            
+            logger.info(f"Environment created with state_dim={state_dim}, action_dim={action_dim}")
             
             # Initialize agent
             self.agent = PPOAgent(
@@ -887,7 +1032,7 @@ class RLTradingManager(TradingManager):
             return False
     
     def train_model(self, symbol: str, data: pd.DataFrame = None, epochs: int = None,
-              save_path: str = None) -> Dict:
+                   save_path: str = None) -> Dict:
         """
         Train the RL model on historical data.
         
@@ -920,6 +1065,9 @@ class RLTradingManager(TradingManager):
                         'message': 'Failed to initialize RL components'
                     }
             
+            # Use provided path or default
+            model_save_path = save_path or self.model_path
+            
             # Number of episodes
             num_episodes = epochs if epochs is not None else self.num_episodes
             
@@ -930,8 +1078,10 @@ class RLTradingManager(TradingManager):
                 'win_rates': [],
                 'max_drawdowns': [],
                 'final_portfolio_values': [],
-                'cumulative_rewards': []  # Nueva métrica para recompensas acumuladas
+                'cumulative_rewards': []
             }
+            
+            logger.info(f"Starting training for {symbol} with {num_episodes} episodes")
             
             # Training loop
             for episode in range(num_episodes):
@@ -940,7 +1090,7 @@ class RLTradingManager(TradingManager):
                 
                 episode_return = 0
                 episode_length = 0
-                cumulative_reward = 0  # Inicializar recompensa acumulada
+                cumulative_reward = 0
                 
                 # Episode loop
                 done = False
@@ -954,7 +1104,7 @@ class RLTradingManager(TradingManager):
                     # Take step in environment
                     next_state, reward, done, _, info = self.env.step(action)
                     
-                    # Acumular recompensa
+                    # Accumulate reward
                     cumulative_reward += reward
                     
                     # Store transition
@@ -971,33 +1121,36 @@ class RLTradingManager(TradingManager):
                 train_metrics = self.agent.train(batch_size=min(64, episode_length), episode=episode)
                 
                 # Record metrics
-                metrics['episode_returns'].append(episode_return)
+                metrics['episode_returns'].append(float(episode_return))
                 metrics['episode_lengths'].append(episode_length)
                 metrics['win_rates'].append(info['win_rate'])
                 metrics['max_drawdowns'].append(info['max_drawdown'])
                 metrics['final_portfolio_values'].append(info['portfolio_value'])
-                metrics['cumulative_rewards'].append(cumulative_reward)  # Guardar recompensa acumulada
+                metrics['cumulative_rewards'].append(float(cumulative_reward))
                 
-                # Log progress with cumulative reward
+                # Log progress
                 logger.info(f"Episode {episode+1}/{num_episodes}: "
-                        f"Return={episode_return:.2f}, "
-                        f"Cumulative Reward={cumulative_reward:.2f}, "  # Mostrar recompensa acumulada
-                        f"Length={episode_length}, "
-                        f"Win Rate={info['win_rate']:.2f}, "
-                        f"Portfolio Value={info['portfolio_value']:.2f}")
+                           f"Return={episode_return:.2f}, "
+                           f"Cumulative Reward={cumulative_reward:.2f}, "
+                           f"Length={episode_length}, "
+                           f"Win Rate={info['win_rate']:.2f}, "
+                           f"Portfolio Value={info['portfolio_value']:.2f}")
                 
                 # Save model periodically
                 if (episode + 1) % self.save_freq == 0:
-                    if save_path:
-                        self.agent.save_model(episode=episode)
-                    else:
-                        self.agent.save_model()
+                    self.agent.save_model(episode=episode)
             
             # Save final model
-            if save_path:
-                self.agent.save_model()
-            else:
-                self.agent.save_model()
+            self.agent.save_model()
+            
+            # Calculate summary statistics
+            avg_return = np.mean(metrics['episode_returns'])
+            avg_win_rate = np.mean(metrics['win_rates'])
+            avg_portfolio_value = np.mean(metrics['final_portfolio_values'])
+            
+            logger.info(f"Training completed: Avg return={avg_return:.2f}, "
+                       f"Avg win rate={avg_win_rate:.2f}, "
+                       f"Avg portfolio value={avg_portfolio_value:.2f}")
             
             return {
                 'status': 'success',
@@ -1005,7 +1158,10 @@ class RLTradingManager(TradingManager):
                 'metrics': metrics,
                 'final_portfolio_value': metrics['final_portfolio_values'][-1],
                 'final_win_rate': metrics['win_rates'][-1],
-                'final_cumulative_reward': metrics['cumulative_rewards'][-1]  # Devolver recompensa acumulada final
+                'final_cumulative_reward': metrics['cumulative_rewards'][-1],
+                'avg_return': float(avg_return),
+                'avg_win_rate': float(avg_win_rate),
+                'avg_portfolio_value': float(avg_portfolio_value)
             }
             
         except Exception as e:
@@ -1057,6 +1213,8 @@ class RLTradingManager(TradingManager):
                 'trades': []
             }
             
+            logger.info(f"Evaluating model on {symbol} for {episodes} episodes")
+            
             # Evaluation loop
             for episode in range(episodes):
                 # Reset environment
@@ -1082,12 +1240,12 @@ class RLTradingManager(TradingManager):
                     episode_length += 1
                 
                 # Record metrics
-                metrics['episode_returns'].append(episode_return)
+                metrics['episode_returns'].append(float(episode_return))
                 metrics['episode_lengths'].append(episode_length)
                 metrics['win_rates'].append(info['win_rate'])
                 metrics['max_drawdowns'].append(info['max_drawdown'])
                 metrics['final_portfolio_values'].append(info['portfolio_value'])
-                metrics['trades'].append(self.env.trades.copy())
+                metrics['trades'].append(self.env.trade_history.copy())
                 
                 # Log progress
                 logger.info(f"Eval Episode {episode+1}/{episodes}: "
@@ -1100,6 +1258,11 @@ class RLTradingManager(TradingManager):
             avg_win_rate = np.mean(metrics['win_rates'])
             avg_max_drawdown = np.mean(metrics['max_drawdowns'])
             avg_portfolio_value = np.mean(metrics['final_portfolio_values'])
+            
+            logger.info(f"Evaluation results: Avg return={avg_return:.2f}, "
+                       f"Avg win rate={avg_win_rate:.2f}, "
+                       f"Avg drawdown={avg_max_drawdown:.2f}, "
+                       f"Avg portfolio value={avg_portfolio_value:.2f}")
             
             return {
                 'status': 'success',
@@ -1237,6 +1400,11 @@ class RLTradingManager(TradingManager):
             stop_loss_pct = action[1]       # Between 0 and 0.1
             take_profit_pct = action[2]     # Between 0 and 0.1
             
+            # Log the action components
+            logger.debug(f"RL action for {symbol}: position_delta={position_delta_pct:.4f}, "
+                       f"stop_loss={stop_loss_pct:.4f}, take_profit={take_profit_pct:.4f}, "
+                       f"confidence={confidence:.4f}")
+            
             # Determine signal based on position delta
             signal = 'neutral'
             if position_delta_pct > 0.2:
@@ -1328,6 +1496,9 @@ class RLTradingManager(TradingManager):
                         stop_loss_price = current_price * (1 + rl_action['stop_loss_pct'])
                     
                     position_details['stop_loss_price'] = stop_loss_price
+                    
+                    logger.info(f"Using RL-determined stop loss for {symbol}: {stop_loss_price:.2f} "
+                               f"({rl_action['stop_loss_pct']:.2%} from entry)")
             
             # Same for take profit
             if 'take_profit_pct' in rl_action and rl_action['take_profit_pct'] > 0:
@@ -1339,6 +1510,9 @@ class RLTradingManager(TradingManager):
                         take_profit_price = current_price * (1 - rl_action['take_profit_pct'])
                     
                     position_details['take_profit_price'] = take_profit_price
+                    
+                    logger.info(f"Using RL-determined take profit for {symbol}: {take_profit_price:.2f} "
+                               f"({rl_action['take_profit_pct']:.2%} from entry)")
         
         # Execute trade using base method with possibly updated position details
         return super().execute_trade(symbol, action, position_details)
@@ -1369,6 +1543,10 @@ class RLTradingManager(TradingManager):
             # Get the RL action for position sizing
             rl_action = signals.get('rl_action', {})
             position_delta_pct = rl_action.get('position_delta_pct', 0)
+            
+            # Log signal information
+            logger.info(f"RL signal for {symbol}: {signals['signal']} (strength: {signals['strength']}), "
+                       f"position_delta: {position_delta_pct:.4f}, active_trade: {has_active_trade}")
             
             # Decide what to do based on signals and active trades
             if has_active_trade:
@@ -1406,6 +1584,8 @@ class RLTradingManager(TradingManager):
                     rl_confidence = rl_action.get('confidence', 0.5)
                     adjusted_size = int(position_details.get('position_size', 0) * max(0.2, rl_confidence))
                     position_details['position_size'] = adjusted_size
+                    
+                    logger.info(f"Adjusted position size for {symbol}: {adjusted_size} units (confidence: {rl_confidence:.2f})")
                     
                     if position_details.get('position_size', 0) <= 0:
                         logger.warning(f"Calculated zero position size for {symbol}")
@@ -1456,3 +1636,45 @@ class RLTradingManager(TradingManager):
         """
         # Use the base implementation with our RL-enhanced methods
         return super().run_trading_cycle(symbols)
+    
+    def get_performance_statistics(self, env_info=None) -> Dict:
+        """
+        Get detailed performance statistics from training or evaluation.
+        
+        Args:
+            env_info: Environment info dict (optional)
+            
+        Returns:
+            Dict: Performance statistics
+        """
+        stats = {
+            'timestamp': datetime.datetime.now().isoformat(),
+            'rl_stats': {}
+        }
+        
+        # If env_info is provided, extract detailed statistics
+        if env_info:
+            stats['rl_stats'] = {
+                'portfolio_value': env_info.get('portfolio_value', 0),
+                'win_rate': env_info.get('win_rate', 0),
+                'total_trades': env_info.get('total_trades', 0),
+                'max_drawdown': env_info.get('max_drawdown', 0),
+                'portfolio_change': env_info.get('portfolio_change', 0)
+            }
+        
+        # Add portfolio info from active trades
+        stats['active_trades'] = len(self.active_trades)
+        stats['active_symbols'] = list(self.active_trades.keys())
+        
+        # Add model metrics if the agent is initialized
+        if self.agent and hasattr(self.agent, 'metrics'):
+            # Add last few metrics
+            num_metrics = min(10, len(self.agent.metrics.get('actor_loss', [])))
+            if num_metrics > 0:
+                stats['recent_metrics'] = {
+                    'actor_loss': self.agent.metrics['actor_loss'][-num_metrics:],
+                    'critic_loss': self.agent.metrics['critic_loss'][-num_metrics:],
+                    'entropy': self.agent.metrics['entropy'][-num_metrics:],
+                }
+        
+        return stats
