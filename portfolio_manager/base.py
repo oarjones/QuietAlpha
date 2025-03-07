@@ -43,7 +43,7 @@ class PortfolioManager:
         self.ibkr = ibkr_interface
         if self.ibkr is None:
             host = self.config.get('ibkr', {}).get('host', '127.0.0.1')
-            port = self.config.get('ibkr', {}).get('port', 7497)
+            port = self.config.get('ibkr', {}).get('port', 4002)
             client_id = self.config.get('ibkr', {}).get('client_id', 1)
             self.ibkr = IBKRInterface(host=host, port=port, client_id=client_id)
             

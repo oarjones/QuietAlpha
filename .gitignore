@@ -37,11 +37,12 @@ ENV/
 *.csv
 
 # Project specific
+config/
 backtesting/
 plots/
 data/raw/*
 data/processed/*
-models/
+models/*
 models/*.h5
 models/*.keras
 models/*.pkl

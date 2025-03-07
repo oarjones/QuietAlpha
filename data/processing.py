@@ -170,7 +170,7 @@ def calculate_technical_indicators(
         result.reset_index(inplace=True)
     
     # Fill NaN values that might be introduced by calculations
-    result.fillna(method='bfill', inplace=True)
+    result.bfill(inplace=True)
     
     return result
 
@@ -240,7 +240,7 @@ def calculate_trend_indicator(df: pd.DataFrame) -> pd.DataFrame:
     ).mean()
     
     # Fill NaN values
-    result['TrendStrength_norm'] = result['TrendStrength_norm'].fillna(method='ffill').fillna(method='bfill')
+    result['TrendStrength_norm'] = result['TrendStrength_norm'].ffill().bfill()
     
     # Final validation
     result['TrendStrength_norm'] = np.clip(result['TrendStrength_norm'], 0, 1)

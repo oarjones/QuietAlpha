@@ -96,7 +96,7 @@ class QuietAlphaTradingBot:
         """Initialize IBKR interface."""
         ibkr_config = self.config.get('ibkr', {})
         host = ibkr_config.get('host', '127.0.0.1')
-        port = ibkr_config.get('port', 7497)
+        port = ibkr_config.get('port', 4002)
         client_id = ibkr_config.get('client_id', 1)
         
         ibkr = IBKRInterface(host=host, port=port, client_id=client_id)

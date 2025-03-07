@@ -41,11 +41,7 @@
     "initial_capital": 2500,
     "data": {
         "symbols": [
-            "AAPL",
-            "MSFT",
-            "GOOGL",
-            "AMZN",
-            "TSLA"
+            "AAPL", "MSFT", "GOOGL", "AMZN", "JPM"
         ],
         "lookback_period": 365
     },

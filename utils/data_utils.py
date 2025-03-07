@@ -245,7 +245,7 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
         # For OHLC data, forward fill is often appropriate
         for col in ['open', 'high', 'low', 'close']:
             if col in cleaned.columns:
-                cleaned[col] = cleaned[col].fillna(method='ffill')
+                cleaned[col] = cleaned[col].ffill()
         
         # For volume, fill with zeros
         if 'volume' in cleaned.columns:
