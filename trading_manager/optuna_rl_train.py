@@ -139,8 +139,13 @@ def fetch_and_process_data(ibkr: IBKRInterface, symbol: str, lookback_days: int 
         # Normalize indicators
         df = normalize_indicators(df)
         
+        # Remove the first 22 rows due to incorrect values from indicator windows
+        df = df.iloc[22:]
+        
         # Remove NaN values
         df.dropna(inplace=True)
+
+        df.to_csv(f'{symbol}_processed.csv', index=False)
         
         logger.info(f"Processed data for {symbol}: {len(df)} rows, {len(df.columns)} columns")
         
@@ -148,6 +153,46 @@ def fetch_and_process_data(ibkr: IBKRInterface, symbol: str, lookback_days: int 
     
     except Exception as e:
         logger.error(f"Error fetching and processing data for {symbol}: {e}")
+        return pd.DataFrame()
+    
+
+def process_data(df:pd.DataFrame) -> pd.DataFrame:
+    """
+    Fetch and process data for a symbol.
+    
+    Args:
+        df: Pandas Dataframe
+        
+    Returns:
+        pd.DataFrame: Processed data
+    """
+    try:
+                
+        if df.empty:
+            logger.warning(f"No data")
+            return pd.DataFrame()
+        
+        # Process data
+        logger.info(f"Processing data ({len(df)} rows)")
+        
+        # Calculate technical indicators
+        df = calculate_technical_indicators(df, include_all=True)
+        
+        # Calculate trend indicator
+        df = calculate_trend_indicator(df)
+        
+        # Normalize indicators
+        df = normalize_indicators(df)
+        
+        # Remove NaN values
+        df.dropna(inplace=True)
+        
+        logger.info(f"Processed data: {len(df)} rows, {len(df.columns)} columns")
+        
+        return df
+    
+    except Exception as e:
+        logger.error(f"Error processing data: {e}")
         return pd.DataFrame()
 
 
@@ -487,17 +532,59 @@ def train_with_best_params(data: pd.DataFrame, best_params: dict, config: dict, 
     env = make_env(data, config)
     eval_env = make_env(data, config)
     
-    # Create model with best parameters
-    model = PPO("MlpPolicy", env, verbose=1, **best_params)
+    # Process the best parameters to make them compatible with PPO
+    processed_params = best_params.copy()
     
-    # Fix activation_fn if it's a string
-    if isinstance(model.policy_kwargs.get("activation_fn", None), str):
-        activation_fn = {
+    # Fix the network architecture parameter
+    if "net_arch" in processed_params and isinstance(processed_params["net_arch"], str):
+        # Convert string representation to actual network architecture
+        # net_arch_map = {
+        #     "small": [dict(pi=[64, 64], vf=[64, 64])],
+        #     "medium": [dict(pi=[128, 128], vf=[128, 128])],
+        #     "large": [dict(pi=[256, 256], vf=[256, 256])],
+        # }
+
+        net_arch_map = {
+            "small": dict(pi=[64, 64], vf=[64, 64]),
+            "medium": dict(pi=[128, 128], vf=[128, 128]),
+            "large": dict(pi=[256, 256], vf=[256, 256]),
+        }
+
+        net_arch = net_arch_map.get(processed_params["net_arch"], [dict(pi=[64, 64], vf=[64, 64])])
+        
+        # Remove from main params and add to policy_kwargs
+        del processed_params["net_arch"]
+        
+        # Ensure policy_kwargs exists
+        if "policy_kwargs" not in processed_params:
+            processed_params["policy_kwargs"] = {}
+            
+        processed_params["policy_kwargs"]["net_arch"] = net_arch
+    
+    # Fix activation function if needed
+    if "activation_fn" in processed_params and isinstance(processed_params["activation_fn"], str):
+        # Convert string to actual activation function
+        activation_map = {
             "tanh": stable_baselines3.common.torch_layers.nn.Tanh,
             "relu": stable_baselines3.common.torch_layers.nn.ReLU,
             "elu": stable_baselines3.common.torch_layers.nn.ELU,
-        }[model.policy_kwargs["activation_fn"]]
-        model.policy_kwargs["activation_fn"] = activation_fn
+        }
+        activation_fn = activation_map.get(processed_params["activation_fn"], stable_baselines3.common.torch_layers.nn.ReLU)
+        
+        # Remove from main params and add to policy_kwargs
+        del processed_params["activation_fn"]
+        
+        # Ensure policy_kwargs exists
+        if "policy_kwargs" not in processed_params:
+            processed_params["policy_kwargs"] = {}
+            
+        processed_params["policy_kwargs"]["activation_fn"] = activation_fn
+    
+    # Log the processed parameters
+    logger.info(f"Using processed parameters: {processed_params}")
+    
+    # Create model with processed parameters
+    model = PPO("MlpPolicy", env, verbose=1, **processed_params)
     
     # Create best model directory
     best_model_dir = "models/rl/best_model"
@@ -559,13 +646,13 @@ def train_with_best_params(data: pd.DataFrame, best_params: dict, config: dict, 
 def main():
     """Main function to run hyperparameter optimization and training."""
     parser = argparse.ArgumentParser(description='RL Trading with Optuna Hyperparameter Optimization')
-    parser.add_argument('--symbol', type=str, default='AAPL', help='Symbol to train on')
+    parser.add_argument('--symbol', type=str, default='MSFT', help='Symbol to train on')
     parser.add_argument('--config', type=str, default='config/lstm_config.json', help='Path to configuration file')
     parser.add_argument('--n-trials', type=int, default=50, help='Number of trials for optimization')
     parser.add_argument('--n-timesteps', type=int, default=100000, help='Number of timesteps for training')
     parser.add_argument('--final-timesteps', type=int, default=200000, help='Number of timesteps for final training')
     parser.add_argument('--n-jobs', type=int, default=1, help='Number of parallel jobs')
-    parser.add_argument('--lookback-days', type=int, default=365, help='Number of days to look back for data')
+    parser.add_argument('--lookback-days', type=int, default=730, help='Number of days to look back for data')
     parser.add_argument('--data-file', type=str, default=None, help='Path to data file (optional)')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     
@@ -588,6 +675,7 @@ def main():
         if args.data_file:
             # Load data from file
             data = load_data_from_file(args.data_file)
+            data = process_data(data)
         else:
             # Initialize IBKR
             ibkr_config = config.get('ibkr', {})
@@ -633,20 +721,21 @@ def main():
             n_jobs=args.n_jobs
         )
         """
+        # Using the best params from previous runs
         best_params = {
-            "learning_rate": 5.984253246234144e-05,
-            "n_steps": 2171,
-            "batch_size": 503,
-            "n_epochs": 19,
-            "gamma": 0.9914553983193832,
-            "gae_lambda": 0.9491142291825448,
-            "clip_range": 0.27625776550096276,
-            "ent_coef": 0.06304257572865528,
-            "vf_coef": 0.7194378115811361,
-            "max_grad_norm": 1.6223447963637094,
+            "learning_rate": 0.00015,
+            "n_steps": 2048,
+            "batch_size": 256,
+            "n_epochs": 24,
+            "gamma": 0.90,
+            "gae_lambda": 0.90,
+            "clip_range": 0.17,
+            "ent_coef": 0.09,
+            "vf_coef": 0.80,
+            "max_grad_norm": 0.70,
             "net_arch": "large",
-            "activation_fn": "relu"
-        }
+            "activation_fn": "tanh"
+            }
 
         # Train final model with best parameters
         logger.info(f"Training final model with best parameters")

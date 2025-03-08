@@ -530,3 +530,4 @@ def add_volume_features(df: pd.DataFrame) -> pd.DataFrame:
     )  # Add 1 to avoid division by zero
     
     return result
+

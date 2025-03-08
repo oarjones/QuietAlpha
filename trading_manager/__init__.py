@@ -6,6 +6,6 @@ from technical analysis and machine learning models.
 """
 
 from trading_manager.base import TradingManager
-from trading_manager.rl_trading_manager import RLTradingManager
+from trading_manager.rl_trading_stable import RLTradingStableManager
 
-__all__ = ['TradingManager', 'RLTradingManager']
+__all__ = ['TradingManager', 'RLTradingStableManager']

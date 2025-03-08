@@ -72,8 +72,22 @@ class SimpleTradingEnv(gym.Env):
         self.done = False
         
         # Extract feature columns (indicators)
-        self.features = [col for col in data.columns 
-                        if col not in ['datetime', 'open', 'high', 'low', 'close', 'volume']]
+        # self.features = [col for col in data.columns 
+        #                 if col not in ['datetime', 'open', 'high', 'low', 'close', 'volume']]
+        
+        self.features = [
+            'EMA_200_norm',        # Contexto tendencia a largo plazo
+            'EMA_21_norm',         # Contexto tendencia intermedia
+            'MACD_diff_norm',      # Señal cambio dirección
+            'RSI_14_norm',         # Fuerza relativa del movimiento
+            'ATR_14_norm',         # Volatilidad absoluta
+            'BB_Width_norm',       # Volatilidad relativa
+            'OBV_norm',            # Volumen acumulado
+            'Force_Index_13_norm', # Fuerza inmediata volumen-precio
+            'ATR_14_norm',         # Riesgo y tamaño posiciones
+            'TrendStrength_norm'   # Indicación general del estado de tendencia
+        ]
+
         
         # Define observation space (state space)
         # Includes technical indicators + position + balance
@@ -166,9 +180,46 @@ class SimpleTradingEnv(gym.Env):
         # Calculate portfolio value before action
         portfolio_value_before = self.balance + self.position * self.current_price
         
-        # Process the action
-        reward = 0
+        # Initialize components of reward for better tracking
+        action_reward = 0
+        holding_penalty = 0
+        invalid_action_penalty = 0
+        portfolio_performance_reward = 0
+        drawdown_penalty = 0
         
+        # Track consecutive holds
+        if not hasattr(self, 'consecutive_holds'):
+            self.consecutive_holds = 0
+        
+        # Process the action
+        action_taken = False  # Flag to track if a meaningful action was taken
+        
+        # --- HOLD ACTION ---
+        if action == 0:  # Hold
+            # Increment consecutive holds counter
+            self.consecutive_holds += 1
+            
+            # Apply mild penalty for excessive holding, more severe after longer periods
+            if self.consecutive_holds > 10:
+                # Sigmoid-like scaling of penalty - increases slowly then more rapidly
+                hold_factor = min((self.consecutive_holds - 10) / 30, 1.0)
+                holding_penalty = 0.1 * hold_factor
+                
+            # Extra penalty if market is moving significantly but we're not acting
+            price_change_pct = abs(next_price - self.current_price) / self.current_price
+            if price_change_pct > 0.01:  # 1% price move
+                volatility_penalty = 0.05 * min(price_change_pct / 0.01, 3.0)  # Scale with volatility, cap at 3x
+                holding_penalty += volatility_penalty
+                
+            # If holding cash for too long (no position), apply additional mild penalty
+            if self.position == 0 and self.consecutive_holds > 20:
+                cash_penalty = 0.02 * min((self.consecutive_holds - 20) / 20, 1.0)
+                holding_penalty += cash_penalty
+        else:
+            # Reset consecutive holds counter on any other action
+            self.consecutive_holds = 0
+        
+        # --- BUY ACTION ---
         if action == 1:  # Buy
             # Calculate how many shares we can buy
             max_new_shares = int(self.balance / (self.current_price * (1 + self.transaction_fee)))
@@ -209,10 +260,20 @@ class SimpleTradingEnv(gym.Env):
                 })
                 
                 self.total_trades += 1
+                action_taken = True
+                
+                # Small positive reward for taking action after long holding period
+                if self.consecutive_holds > 15:
+                    action_reward += 0.1
                 
                 logger.debug(f"Buy: {position_size} shares at {self.current_price:.2f}, " +
                             f"new total position: {self.position}, avg price: {self.avg_entry_price:.2f}")
+            else:
+                # Tried to buy but couldn't (no funds or at max position)
+                # Small penalty for attempting invalid action
+                invalid_action_penalty = 0.05
         
+        # --- SELL ACTION ---
         elif action == 2:  # Sell
             # Only sell if we have a position
             if self.position > 0:
@@ -246,8 +307,16 @@ class SimpleTradingEnv(gym.Env):
                 # Calculate reward based on profit/loss relative to investment
                 position_cost = entry_value + trade_cost
                 if position_cost > 0:  # Avoid division by zero
-                    reward = profit_loss / position_cost  # Percentage return
+                    # Scale the profit/loss reward to keep it in a reasonable range
+                    # Apply tanh to limit extreme values while preserving sign
+                    profit_loss_pct = profit_loss / position_cost
+                    action_reward = np.tanh(profit_loss_pct * 5) * 0.5  # Scale to [-0.5, 0.5] range
                 
+                # Small positive reward for taking action after long holding period
+                if self.consecutive_holds > 15:
+                    action_reward += 0.1
+                
+                action_taken = True
                 logger.debug(f"Sell: {self.position} shares at {self.current_price:.2f}, P&L: {profit_loss:.2f}")
                 
                 # Reset position
@@ -255,6 +324,10 @@ class SimpleTradingEnv(gym.Env):
                 self.avg_entry_price = 0
                 
                 self.total_trades += 1
+            else:
+                # Tried to sell but no position
+                # Small penalty for attempting invalid action
+                invalid_action_penalty = 0.05
         
         # Move to the next time step
         self.current_step += 1
@@ -271,12 +344,54 @@ class SimpleTradingEnv(gym.Env):
             current_drawdown = (self.peak_portfolio_value - self.portfolio_value) / self.peak_portfolio_value
         self.max_drawdown = max(self.max_drawdown, current_drawdown)
         
-        # If no explicit reward from selling, calculate reward based on portfolio value change
-        if reward == 0:
-            # Simple reward based on portfolio value change
+        # Penalize drawdowns more explicitly but with a reasonable scale
+        if current_drawdown > 0.05:  # More than 5% drawdown
+            # Apply sigmoid-like scaling to avoid extreme penalties
+            drawdown_penalty = 0.2 * min(current_drawdown / 0.05, 2.0)
+        
+        # Calculate portfolio performance reward if no explicit reward from selling
+        if action_reward == 0:
+            # Calculate portfolio value change
             portfolio_value_after = self.balance + self.position * next_price
             portfolio_return = (portfolio_value_after - portfolio_value_before) / portfolio_value_before
-            reward = portfolio_return * 10  # Scale for more meaningful rewards
+            
+            # Scale reward to a reasonable range using tanh
+            portfolio_performance_reward = np.tanh(portfolio_return * 5) * 0.2  # Scale to [-0.2, 0.2] range
+            
+            # Add small bonus/penalty for being in the market during price movements
+            if self.position > 0:
+                if portfolio_return > 0:
+                    portfolio_performance_reward += 0.02  # Small bonus for catching uptrend
+                elif portfolio_return < 0:
+                    portfolio_performance_reward -= 0.02  # Small penalty for getting caught in downtrend
+        
+        # Apply inactivity penalty for long periods without trades
+        inactivity_penalty = 0
+        
+        if not action_taken and not hasattr(self, 'last_trade_step'):
+            self.last_trade_step = 0
+            
+        if action_taken:
+            self.last_trade_step = self.current_step
+        elif hasattr(self, 'last_trade_step'):
+            # Increasing penalty for long periods without trading
+            inactivity_duration = self.current_step - self.last_trade_step
+            if inactivity_duration > 50:  # Arbitrary threshold
+                inactivity_factor = min((inactivity_duration - 50) / 100, 1.0)
+                inactivity_penalty = 0.1 * inactivity_factor
+        
+        # Combine all reward components with careful weighting
+        reward = (
+            action_reward * 1.0 +                   # Strongest weight for direct trade results
+            portfolio_performance_reward * 0.8 -    # Strong weight for portfolio performance
+            holding_penalty * 0.5 -                 # Moderate penalty for excessive holding
+            invalid_action_penalty * 0.3 -          # Mild penalty for invalid actions
+            drawdown_penalty * 0.7 -                # Significant penalty for drawdowns
+            inactivity_penalty * 0.4                # Moderate penalty for inactivity
+        )
+        
+        # Apply final scaling to keep reward in a reasonable range
+        reward = np.clip(reward, -1.0, 1.0)
         
         # Check if we're done
         self.done = self.current_step >= len(self.data) - 1
@@ -284,6 +399,20 @@ class SimpleTradingEnv(gym.Env):
         # Return results
         next_observation = self._get_observation()
         info = self._get_info()
+        
+        # Add detailed reward components to info for debugging
+        info.update({
+            'consecutive_holds': self.consecutive_holds,
+            'reward_components': {
+                'action_reward': action_reward,
+                'portfolio_performance': portfolio_performance_reward,
+                'holding_penalty': holding_penalty,
+                'invalid_action_penalty': invalid_action_penalty,
+                'drawdown_penalty': drawdown_penalty,
+                'inactivity_penalty': inactivity_penalty,
+                'total_reward': reward
+            }
+        })
         
         return next_observation, reward, self.done, False, info
     
