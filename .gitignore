@@ -37,9 +37,11 @@ ENV/
 *.csv
 
 # Project specific
-config/
-backtesting/
-plots/
+results/*
+config/*
+backtesting/*
+plots/*
+data/*
 data/raw/*
 data/processed/*
 models/*
