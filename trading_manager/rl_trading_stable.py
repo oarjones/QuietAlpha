@@ -636,6 +636,8 @@ class EnhancedTradingEnv(gym.Env):
             'inactivity_penalty': 0,
             'win_streak_reward': 0
         }
+
+        self.current_observation =None
         
         # Reset on init
         self.reset()
@@ -774,6 +776,8 @@ class EnhancedTradingEnv(gym.Env):
         for key in self.reward_components:
             self.reward_components[key] = 0
         
+        self.current_observation=None
+
         # Get initial observation
         observation = self._get_observation()
         info = self._get_info()
@@ -1131,7 +1135,7 @@ class EnhancedTradingEnv(gym.Env):
                 
                 # Calculate downside deviation (standard deviation of negative returns only)
                 negative_returns = [r for r in self.return_window if r < 0]
-                downside_std = np.std(negative_returns) if negative_returns else 1e-6
+                downside_std = (np.std(negative_returns) if negative_returns else 1e-6) + 1e-8
                 
                 # Calculate rolling Sortino ratio
                 sortino = (mean_return - self.risk_free_rate) / downside_std
@@ -1257,7 +1261,9 @@ class EnhancedTradingEnv(gym.Env):
             [normalized_position, normalized_balance, unrealized_pnl_ratio, win_streak, recent_volatility]
         ])
         
-        return obs.astype(np.float32)
+        self.current_observation=obs.astype(np.float32)
+
+        return self.current_observation
     
     def _get_info(self):
         """

@@ -77,7 +77,7 @@ class DetailedEvalCallback(EvalCallback):
             # Run full episode evaluation to get accurate metrics
             if hasattr(self.eval_env, 'run_full_episode'):
                 try:
-                    metrics = self.eval_env.run_full_episode(self.model, self.deterministic)
+                    metrics = self.eval_env.run_full_episode(self.model, self.deterministic, reset_env=False)
                     
                     # Extract financial metrics
                     win_rate = metrics.get('win_rate', 0) * 100
@@ -114,9 +114,10 @@ class DetailedEvalCallback(EvalCallback):
         
         return True
 
+
 class DetailedTrialEvalCallback(EvalCallback):
     """
-    Versión corregida del callback de evaluación para pruebas de Optuna que ejecuta
+    Versión mejorada del callback de evaluación para pruebas de Optuna que ejecuta
     correctamente un episodio completo para obtener métricas financieras precisas.
     """
     
@@ -162,9 +163,15 @@ class DetailedTrialEvalCallback(EvalCallback):
             self.trial.report(self.last_mean_reward, self.eval_idx)
             
             # Get financial metrics by running a complete episode
+            # El parámetro reset_env=False es crucial para no perder métricas acumuladas
             if hasattr(self.eval_env, 'run_full_episode'):
                 try:
-                    metrics = self.eval_env.run_full_episode(self.model, self.deterministic)
+                    # Ejecutar episodio sin resetear el entorno para mantener métricas
+                    metrics = self.eval_env.run_full_episode(
+                        self.model, 
+                        self.deterministic, 
+                        reset_env=False  # No resetear para mantener métricas acumuladas
+                    )
                     
                     # Extract financial metrics
                     win_rate = metrics.get('win_rate', 0) * 100
@@ -338,7 +345,6 @@ class IncrementalTrialCallback:
             print(f"Best trial: #{self.best_trial_number+1} with value {self.best_value:.4f}")
         print("=" * 80 + "\n")
 
-
 def make_enhanced_env(data, config, isEval=False):
     """
     Versión corregida de make_enhanced_env que mejora el manejo de estados
@@ -379,65 +385,119 @@ def make_enhanced_env(data, config, isEval=False):
     # Create vectorized environment
     env = DummyVecEnv([_init])
     
-    # Add methods to access and set environment state
-    def get_state():
-        """Get the current state of the environment."""
-        env_unwrapped:EnhancedTradingEnv = env.envs[0].unwrapped
-        state:Dict = env_unwrapped.get_state()
-        return {
-            'balance': state['balance'],
-            'position': state['position'],
-            'current_step': state['current_step'],
-            'portfolio_value': state['portfolio_value']
+    # Inicializar métricas acumulativas para evaluación
+    if not hasattr(env, 'evaluation_metrics'):
+        env.evaluation_metrics = {
+            'episodes_run': 0,
+            'winning_trades': 0,
+            'total_trades': 0,
+            'portfolio_changes': [],
+            'max_drawdown_seen': 0.0
         }
     
-    def set_state(state):
-        """Set the state of the environment."""
-        env_unwrapped = env.envs[0].unwrapped
-        env_unwrapped.balance = state['balance']
-        env_unwrapped.position = state['position']
-        env_unwrapped.current_step = state['current_step']
-        env_unwrapped.portfolio_value = state['portfolio_value']
-    
+    # Add methods to access unwrapped environment directly
     def get_unwrapped_env():
         """Get the unwrapped environment instance."""
         return env.envs[0].unwrapped
-
-    def get_unwrapped():
-        """Get the unwrapped environment."""
-        return env.envs[0].unwrapped
     
     # Define a method to run a complete evaluation episode correctly
-    def run_full_episode(model, deterministic=True):
+    def run_full_episode(model, deterministic=True, reset_env=False):
         """
         Run a complete episode and return metrics
+        
+        Args:
+            model: The model to evaluate
+            deterministic: Whether to use deterministic actions
+            reset_env: Whether to reset environment state before evaluation
         """
         # Get unwrapped environment for direct access
         unwrapped = get_unwrapped_env()
         
-        # Reset environment to initial state
-        obs = env.reset()
+        # Guardar el estado actual para poder restaurarlo después
+        if hasattr(unwrapped, 'get_state'):
+            original_state = unwrapped.get_state()
+
+        tradingEnv: EnhancedTradingEnv = env.envs[0].unwrapped
+        
+        # Reset environment to specific state if requested
+        if reset_env:
+            obs = env.reset()
+        else:            
+            # Otherwise, capture current observation without resetting
+            obs = tradingEnv.current_observation
+            if obs is None:  # Si no hay observación actual, debemos resetear
+                obs = env.reset()
+        
+        # Ejecutar un episodio completo (hasta que done=True)
+        # Almacenamos las recompensas para cálculo de métricas
         done = False
         total_reward = 0
+        episode_rewards = []
+        trade_results = []
+        initial_portfolio = unwrapped.portfolio_value
         
-        # Run until episode is done
-        while not done:
+        step_count = 0
+        max_steps = len(unwrapped.data) - unwrapped.current_step - 1
+        max_steps = min(max_steps, 1000)  # Limitar a 1000 pasos máximo
+        
+        while not done and step_count < max_steps:
             action, _ = model.predict(obs, deterministic=deterministic)
-            obs, reward, done, info = env.step(action)
+            obs, reward, done, truncated, info = tradingEnv.step(action)
             total_reward += reward
+            episode_rewards.append(reward)
+            
+            # Registrar operaciones completadas para análisis
+            if hasattr(unwrapped, 'trades') and len(unwrapped.trades) > 0:
+                latest_trade = unwrapped.trades[-1]
+                if latest_trade.get('type') == 'sell':  # Solo operaciones completadas
+                    trade_results.append(latest_trade.get('profit_loss', 0))
+            
+            step_count += 1
         
-        # Get metrics directly from unwrapped environment
-        metrics = unwrapped._get_info()
+        # Obtener métricas del episodio
+        episode_info = unwrapped._get_info()
+        
+        # Actualizar métricas acumulativas para evaluación
+        env.evaluation_metrics['episodes_run'] += 1
+        env.evaluation_metrics['winning_trades'] += episode_info.get('winning_trades', 0)
+        env.evaluation_metrics['total_trades'] += episode_info.get('total_trades', 0)
+        
+        # Calcular cambio porcentual en portafolio
+        final_portfolio = unwrapped.portfolio_value
+        portfolio_change = (final_portfolio - initial_portfolio) / initial_portfolio
+        env.evaluation_metrics['portfolio_changes'].append(portfolio_change)
+        
+        # Actualizar drawdown máximo visto
+        current_drawdown = episode_info.get('max_drawdown', 0)
+        env.evaluation_metrics['max_drawdown_seen'] = max(
+            env.evaluation_metrics['max_drawdown_seen'], current_drawdown
+        )
+        
+        # Calcular métricas acumulativas
+        accumulated_metrics = {
+            'win_rate': env.evaluation_metrics['winning_trades'] / max(1, env.evaluation_metrics['total_trades']),
+            'portfolio_change': sum(env.evaluation_metrics['portfolio_changes']) / max(1, len(env.evaluation_metrics['portfolio_changes'])),
+            'max_drawdown': env.evaluation_metrics['max_drawdown_seen'],
+            'total_trades': env.evaluation_metrics['total_trades'],
+            'sharpe_ratio': episode_info.get('sharpe_ratio', 0),
+            'sortino_ratio': episode_info.get('sortino_ratio', 0),
+            'calmar_ratio': episode_info.get('calmar_ratio', 0)
+        }
+        
+        # Restaurar el estado original si es necesario
+        if not reset_env and hasattr(unwrapped, 'set_state') and 'original_state' in locals():
+            unwrapped.set_state(original_state)
         
         return {
             'total_reward': float(total_reward),
-            'win_rate': float(metrics.get('win_rate', 0)),
-            'portfolio_change': float(metrics.get('portfolio_change', 0)),
-            'max_drawdown': float(metrics.get('max_drawdown', 0)),
-            'total_trades': int(metrics.get('total_trades', 0)),
-            'sharpe_ratio': float(metrics.get('sharpe_ratio', 0)),
-            'sortino_ratio': float(metrics.get('sortino_ratio', 0)),
-            'calmar_ratio': float(metrics.get('calmar_ratio', 0))
+            'episode_length': step_count,
+            'win_rate': float(accumulated_metrics['win_rate']),
+            'portfolio_change': float(accumulated_metrics['portfolio_change']),
+            'max_drawdown': float(accumulated_metrics['max_drawdown']),
+            'total_trades': int(accumulated_metrics['total_trades']),
+            'sharpe_ratio': float(accumulated_metrics['sharpe_ratio']),
+            'sortino_ratio': float(accumulated_metrics['sortino_ratio']),
+            'calmar_ratio': float(accumulated_metrics['calmar_ratio'])
         }
     
     # Add the method to the environment
@@ -445,17 +505,7 @@ def make_enhanced_env(data, config, isEval=False):
     env.get_unwrapped_env = get_unwrapped_env
     
     return env
-    
-    # Add methods to the environment
-    env.env_method = lambda method_name, *args, **kwargs: [
-        getattr(env.envs[0], method_name)(*args, **kwargs)]
-    
-    # Add the methods to the first environment
-    setattr(env.envs[0], 'get_state', get_state)
-    setattr(env.envs[0], 'set_state', set_state)
-    setattr(env.envs[0], 'get_unwrapped', get_unwrapped)
-    
-    return env
+
 
 def enhance_trading_manager(manager: RLTradingStableManager):
     """
