@@ -38,24 +38,22 @@ logger = logging.getLogger(__name__)
 
 class DetailedEvalCallback(EvalCallback):
     """
-    Callback for evaluating an agent with more detailed logging.
-    
-    This extends the standard EvalCallback to provide more detailed
-    information during training, including financial metrics.
+    Versión corregida de DetailedEvalCallback que ejecuta episodios completos
+    para obtener métricas financieras precisas.
     """
     
     def __init__(
         self,
-        eval_env: VecEnv,
-        callback_on_new_best: Optional[BaseCallback] = None,
-        n_eval_episodes: int = 5,
-        eval_freq: int = 10000,
-        log_path: Optional[str] = None,
-        best_model_save_path: Optional[str] = None,
-        deterministic: bool = True,
-        render: bool = False,
-        verbose: int = 1,
-        warn: bool = True,
+        eval_env,
+        callback_on_new_best=None,
+        n_eval_episodes=5,
+        eval_freq=10000,
+        log_path=None,
+        best_model_save_path=None,
+        deterministic=True,
+        render=False,
+        verbose=1,
+        warn=True,
     ):
         super().__init__(
             eval_env=eval_env,
@@ -76,106 +74,62 @@ class DetailedEvalCallback(EvalCallback):
             # Call parent evaluation method
             parent_continue = super()._on_step()
             
-            # Get additional metrics from the environment
-            try:
-                # Run a complete episode to get financial metrics
-                # But we need to save/restore env state
+            # Run full episode evaluation to get accurate metrics
+            if hasattr(self.eval_env, 'run_full_episode'):
                 try:
-                    # Try to save state if the method exists
-                    original_env_state = self.eval_env.env_method("get_state")[0]
-                    has_state_methods = True
-                except (AttributeError, TypeError):
-                    # If get_state doesn't exist, we'll have to do things differently
-                    has_state_methods = False
-                    logger.warning("Environment doesn't support get_state(). Using direct metrics.")
-                
-                # If we can save/restore state, run a complete episode
-                if has_state_methods:
-                    # Reset environment
-                    obs = self.eval_env.reset()
-                    done = False
+                    metrics = self.eval_env.run_full_episode(self.model, self.deterministic)
                     
-                    # Run episode
-                    while not done:
-                        action, _ = self.model.predict(obs, deterministic=self.deterministic)
-                        obs, _, done, _ = self.eval_env.step(action)
+                    # Extract financial metrics
+                    win_rate = metrics.get('win_rate', 0) * 100
+                    portfolio_change = metrics.get('portfolio_change', 0) * 100
+                    max_drawdown = metrics.get('max_drawdown', 0) * 100
+                    total_trades = metrics.get('total_trades', 0)
+                    sharpe_ratio = metrics.get('sharpe_ratio', 0)
+                    sortino_ratio = metrics.get('sortino_ratio', 0)
                     
-                    # Get metrics from unwrapped env
-                    try:
-                        env_unwrapped = self.eval_env.env_method("get_unwrapped")[0]
-                        info = env_unwrapped._get_info()
-                    except (AttributeError, TypeError):
-                        # Fallback to getting info directly
-                        env_unwrapped = self.eval_env.envs[0].unwrapped
-                        info = env_unwrapped._get_info()
+                    # Calculate elapsed time
+                    elapsed = time.time() - self.start_time
+                    elapsed_str = str(timedelta(seconds=int(elapsed)))
                     
-                    # Restore original state
-                    try:
-                        self.eval_env.env_method("set_state", original_env_state)
-                    except (AttributeError, TypeError):
-                        # If can't restore, just reset
-                        logger.warning("Couldn't restore environment state.")
-                        self.eval_env.reset()
-                else:
-                    # If we can't save/restore state, get metrics directly
-                    env_unwrapped = self.eval_env.envs[0].unwrapped
-                    info = env_unwrapped._get_info()
+                    # Log more detailed information
+                    if self.verbose > 0:
+                        print(f"\n{'=' * 50}")
+                        print(f"Evaluation at {self.num_timesteps} timesteps ({elapsed_str})")
+                        print(f"Mean reward: {self.last_mean_reward:.2f}")
+                        print(f"Win rate: {win_rate:.2f}%")
+                        print(f"Portfolio change: {portfolio_change:.2f}%")
+                        print(f"Max drawdown: {max_drawdown:.2f}%")
+                        print(f"Total trades: {total_trades}")
+                        print(f"Sharpe ratio: {sharpe_ratio:.4f}")
+                        print(f"Sortino ratio: {sortino_ratio:.4f}")
+                        print(f"{'=' * 50}\n")
                 
-                # Extract financial metrics
-                win_rate = info.get('win_rate', 0) * 100
-                portfolio_change = info.get('portfolio_change', 0) * 100
-                max_drawdown = info.get('max_drawdown', 0) * 100
-                total_trades = info.get('total_trades', 0)
-                sharpe_ratio = info.get('sharpe_ratio', 0)
-                sortino_ratio = info.get('sortino_ratio', 0)
-                
-                # Calculate elapsed time
-                elapsed = time.time() - self.start_time
-                elapsed_str = str(timedelta(seconds=int(elapsed)))
-                
-                # Log more detailed information
-                if self.verbose > 0:
-                    print(f"\n{'=' * 50}")
-                    print(f"Evaluation at {self.num_timesteps} timesteps ({elapsed_str})")
-                    print(f"Mean reward: {self.last_mean_reward:.2f}")
-                    print(f"Win rate: {win_rate:.2f}%")
-                    print(f"Portfolio change: {portfolio_change:.2f}%")
-                    print(f"Max drawdown: {max_drawdown:.2f}%")
-                    print(f"Total trades: {total_trades}")
-                    print(f"Sharpe ratio: {sharpe_ratio:.4f}")
-                    print(f"Sortino ratio: {sortino_ratio:.4f}")
-                    print(f"{'=' * 50}\n")
-            except Exception as e:
-                # If failed to get additional metrics, just continue
-                logger.error(f"Error obteniendo métricas detalladas: {e}")
-                if self.verbose > 0:
-                    print(f"Error obteniendo métricas detalladas: {e}")
+                except Exception as e:
+                    # If failed to get additional metrics, just show a message
+                    logger.error(f"Error obteniendo métricas detalladas: {e}")
+                    if self.verbose > 0:
+                        print(f"Error obteniendo métricas detalladas: {e}")
             
             return parent_continue
         
         return True
 
-
 class DetailedTrialEvalCallback(EvalCallback):
     """
-    Callback for evaluating and pruning trials in Optuna with detailed logging.
-    
-    This callback extends EvalCallback to:
-    1. Report metrics to Optuna for pruning
-    2. Provide detailed feedback on evaluation metrics
-    3. Calculate and report financial metrics
+    Versión corregida del callback de evaluación para pruebas de Optuna que ejecuta
+    correctamente un episodio completo para obtener métricas financieras precisas.
     """
     
     def __init__(
         self,
-        eval_env: VecEnv,
-        trial: optuna.Trial,
-        n_eval_episodes: int = 5,
-        eval_freq: int = 10000,
-        log_path: Optional[str] = None,
-        best_model_save_path: Optional[str] = None,
-        deterministic: bool = True,
-        verbose: int = 1,
+        eval_env,
+        trial,
+        n_eval_episodes=5,
+        eval_freq=10000,
+        log_path=None,
+        best_model_save_path=None,
+        deterministic=True,
+        verbose=1,
     ):
         super().__init__(
             eval_env=eval_env,
@@ -200,84 +154,47 @@ class DetailedTrialEvalCallback(EvalCallback):
     
     def _on_step(self) -> bool:
         if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
-            # Call original evaluation
+            # Call original evaluation for reward calculation
             continue_training = super()._on_step()
             
-            # Report to Optuna for pruning
+            # Report reward to Optuna for pruning
             self.eval_idx += 1
             self.trial.report(self.last_mean_reward, self.eval_idx)
             
-            # Get additional metrics from the environment
-            try:
-                # Run a complete episode to get financial metrics
-                # But we need to save/restore env state
+            # Get financial metrics by running a complete episode
+            if hasattr(self.eval_env, 'run_full_episode'):
                 try:
-                    # Try to save state if the method exists
-                    original_env_state = self.eval_env.env_method("get_state")[0]
-                    has_state_methods = True
-                except (AttributeError, TypeError):
-                    # If get_state doesn't exist, we'll have to do things differently
-                    has_state_methods = False
-                    logger.warning("Environment doesn't support get_state(). Using direct metrics.")
-                
-                # If we can save/restore state, run a complete episode
-                if has_state_methods:
-                    # Reset environment
-                    obs = self.eval_env.reset()
-                    done = False
+                    metrics = self.eval_env.run_full_episode(self.model, self.deterministic)
                     
-                    # Run episode
-                    while not done:
-                        action, _ = self.model.predict(obs, deterministic=self.deterministic)
-                        obs, _, done, _= self.eval_env.step(action)
+                    # Extract financial metrics
+                    win_rate = metrics.get('win_rate', 0) * 100
+                    portfolio_change = metrics.get('portfolio_change', 0) * 100
+                    max_drawdown = metrics.get('max_drawdown', 0) * 100
+                    total_trades = metrics.get('total_trades', 0)
+                    sharpe_ratio = metrics.get('sharpe_ratio', 0)
+                    sortino_ratio = metrics.get('sortino_ratio', 0)
                     
-                    # Get metrics from unwrapped env
-                    try:
-                        env_unwrapped = self.eval_env.env_method("get_unwrapped")[0]
-                        info = env_unwrapped._get_info()
-                    except (AttributeError, TypeError):
-                        # Fallback to getting info directly
-                        env_unwrapped = self.eval_env.envs[0].unwrapped
-                        info = env_unwrapped._get_info()
-                    
-                    # Restore original state
-                    try:
-                        self.eval_env.env_method("set_state", original_env_state)
-                    except (AttributeError, TypeError):
-                        # If can't restore, just reset
-                        logger.warning("Couldn't restore environment state.")
-                        self.eval_env.reset()
-                else:
-                    # If we can't save/restore state, get metrics directly
-                    env_unwrapped = self.eval_env.envs[0].unwrapped
-                    info = env_unwrapped._get_info()
-                
-                # Extract financial metrics
-                win_rate = info.get('win_rate', 0) * 100
-                portfolio_change = info.get('portfolio_change', 0) * 100
-                max_drawdown = info.get('max_drawdown', 0) * 100
-                total_trades = info.get('total_trades', 0)
-                sharpe_ratio = info.get('sharpe_ratio', 0)
-                sortino_ratio = info.get('sortino_ratio', 0)
-                
-                # Set additional attributes for the trial
-                self.trial.set_user_attr('win_rate', info.get('win_rate', 0))
-                self.trial.set_user_attr('portfolio_change', info.get('portfolio_change', 0))
-                self.trial.set_user_attr('max_drawdown', info.get('max_drawdown', 0))
-                self.trial.set_user_attr('total_trades', info.get('total_trades', 0))
-                self.trial.set_user_attr('sharpe_ratio', sharpe_ratio)
-                self.trial.set_user_attr('sortino_ratio', sortino_ratio)                           
+                    # Set additional attributes for the trial
+                    self.trial.set_user_attr('win_rate', metrics.get('win_rate', 0))
+                    self.trial.set_user_attr('portfolio_change', metrics.get('portfolio_change', 0))
+                    self.trial.set_user_attr('max_drawdown', metrics.get('max_drawdown', 0))
+                    self.trial.set_user_attr('total_trades', metrics.get('total_trades', 0))
+                    self.trial.set_user_attr('sharpe_ratio', sharpe_ratio)
+                    self.trial.set_user_attr('sortino_ratio', sortino_ratio)                           
 
-                # Print metrics
+                    # Print metrics
+                    if self.verbose > 0:
+                        print(f"{self.num_timesteps:<10} {self.last_mean_reward:<10.2f} {win_rate:<10.2f} {portfolio_change:<10.2f} {max_drawdown:<10.2f} {total_trades:<8} {sharpe_ratio:<8.2f}")
+                
+                except Exception as e:
+                    # If metrics extraction fails, just print basic info with zeros
+                    if self.verbose > 0:
+                        logger.error(f"Error obteniendo métricas detalladas: {e}")
+                        print(f"{self.num_timesteps:<10} {self.last_mean_reward:<10.2f} 0.00       0.00       0.00       0        0.00")
+            else:
+                # If run_full_episode is not available, print basic info with zeros
                 if self.verbose > 0:
-                    print(f"{self.num_timesteps:<10} {self.last_mean_reward:<10.2f} {win_rate:<10.2f} {portfolio_change:<10.2f} {max_drawdown:<10.2f} {total_trades:<8} {sharpe_ratio:<8.2f}")
-                    
-            except Exception as e:
-                # If metrics extraction fails, just print basic info
-                logger.error(f"Error obteniendo métricas detalladas: {e}")
-                if self.verbose > 0:
-                    print(f"{self.num_timesteps:<10} {self.last_mean_reward:<10.2f}")
-                    print(f"Error obteniendo métricas detalladas: {e}")
+                    print(f"{self.num_timesteps:<10} {self.last_mean_reward:<10.2f} 0.00       0.00       0.00       0        0.00")
             
             # Prune trial if needed
             if self.trial.should_prune():
@@ -422,17 +339,13 @@ class IncrementalTrialCallback:
         print("=" * 80 + "\n")
 
 
-def make_enhanced_env(data: pd.DataFrame, config: Dict, isEval:bool) -> DummyVecEnv:
+def make_enhanced_env(data, config, isEval=False):
     """
-    Create an enhanced trading environment wrapped in DummyVecEnv.
+    Versión corregida de make_enhanced_env que mejora el manejo de estados
+    y asegura que la evaluación pueda realizarse correctamente.
+    """
+    from trading_manager.rl_trading_stable import EnhancedTradingEnv
     
-    Args:
-        data: Historical price data
-        config: Environment configuration
-        
-    Returns:
-        DummyVecEnv: Vectorized environment
-    """
     def _init():
         # Create enhanced trading environment with configuration
         env = EnhancedTradingEnv(
@@ -454,11 +367,10 @@ def make_enhanced_env(data: pd.DataFrame, config: Dict, isEval:bool) -> DummyVec
         )
 
         filename = None
-
         if isEval:
-            filename="./training_logs"
-        else:
             filename="./eval_logs"
+        else:
+            filename="./training_logs"
             
         # Wrap environment with Monitor for logging
         env = Monitor(env, filename=filename)
@@ -487,9 +399,52 @@ def make_enhanced_env(data: pd.DataFrame, config: Dict, isEval:bool) -> DummyVec
         env_unwrapped.current_step = state['current_step']
         env_unwrapped.portfolio_value = state['portfolio_value']
     
+    def get_unwrapped_env():
+        """Get the unwrapped environment instance."""
+        return env.envs[0].unwrapped
+
     def get_unwrapped():
         """Get the unwrapped environment."""
         return env.envs[0].unwrapped
+    
+    # Define a method to run a complete evaluation episode correctly
+    def run_full_episode(model, deterministic=True):
+        """
+        Run a complete episode and return metrics
+        """
+        # Get unwrapped environment for direct access
+        unwrapped = get_unwrapped_env()
+        
+        # Reset environment to initial state
+        obs = env.reset()
+        done = False
+        total_reward = 0
+        
+        # Run until episode is done
+        while not done:
+            action, _ = model.predict(obs, deterministic=deterministic)
+            obs, reward, done, info = env.step(action)
+            total_reward += reward
+        
+        # Get metrics directly from unwrapped environment
+        metrics = unwrapped._get_info()
+        
+        return {
+            'total_reward': float(total_reward),
+            'win_rate': float(metrics.get('win_rate', 0)),
+            'portfolio_change': float(metrics.get('portfolio_change', 0)),
+            'max_drawdown': float(metrics.get('max_drawdown', 0)),
+            'total_trades': int(metrics.get('total_trades', 0)),
+            'sharpe_ratio': float(metrics.get('sharpe_ratio', 0)),
+            'sortino_ratio': float(metrics.get('sortino_ratio', 0)),
+            'calmar_ratio': float(metrics.get('calmar_ratio', 0))
+        }
+    
+    # Add the method to the environment
+    env.run_full_episode = run_full_episode
+    env.get_unwrapped_env = get_unwrapped_env
+    
+    return env
     
     # Add methods to the environment
     env.env_method = lambda method_name, *args, **kwargs: [

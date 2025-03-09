@@ -366,6 +366,14 @@ def custom_run_enhanced_optimization(
             if eval_callback.is_pruned:
                 raise optuna.exceptions.TrialPruned()
             
+            # Run one final full episode to get complete metrics
+            final_metrics = eval_env.run_full_episode(model, deterministic=True)
+            
+            # Set final attributes
+            for key, value in final_metrics.items():
+                if key != 'total_reward':  # Skip reward as it's already set
+                    trial.set_user_attr(key, value)
+            
             # Return best reward as the objective value
             return eval_callback.best_mean_reward
             
