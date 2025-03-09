@@ -58,17 +58,17 @@
             "consistency_reward_factor": 0.2,
             "trend_following_factor": 0.3,
             "win_streak_factor": 0.1,
-            "net_arch": "medium",
-            "learning_rate": 0.0003,
+            "net_arch": "large",
+            "learning_rate": 0.00015,
             "n_steps": 2048,
-            "batch_size": 64,
-            "n_epochs": 10,
-            "gamma": 0.99,
+            "batch_size": 256,
+            "n_epochs": 24,
+            "gamma": 0.9,
             "gae_lambda": 0.95,
-            "clip_range": 0.2,
-            "ent_coef": 0.01,
-            "vf_coef": 0.5,
-            "max_grad_norm": 0.5
+            "clip_range": 0.17,
+            "ent_coef": 0.09,
+            "vf_coef": 0.8,
+            "max_grad_norm": 0.7
         }
     },
     "risk_management": {

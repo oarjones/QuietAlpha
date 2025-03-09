@@ -13,12 +13,333 @@ from typing import Dict, List, Tuple, Any, Optional
 import gymnasium as gym
 from gymnasium import spaces
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
+from stable_baselines3.common.vec_env import VecEnv, DummyVecEnv, VecMonitor
 from stable_baselines3.common.monitor import Monitor
 
 from trading_manager.rl_trading_stable import EnhancedTradingEnv, RLTradingStableManager
 
+
+
+import optuna
+from optuna.pruners import MedianPruner
+from optuna.samplers import TPESampler
+
+from stable_baselines3.common.callbacks import BaseCallback, EvalCallback, StopTrainingOnNoModelImprovement
+
+from stable_baselines3.common.evaluation import evaluate_policy
+import time
+import json
+from datetime import datetime, timedelta
+
+
+import logging
+
+from typing import Dict, Any, Optional, Union, List
+
+
 logger = logging.getLogger(__name__)
+
+
+class DetailedEvalCallback(EvalCallback):
+    """
+    Callback for evaluating an agent with more detailed logging.
+    
+    This extends the standard EvalCallback to provide more detailed
+    information during training, including financial metrics.
+    """
+    
+    def __init__(
+        self,
+        eval_env: VecEnv,
+        callback_on_new_best: Optional[BaseCallback] = None,
+        n_eval_episodes: int = 5,
+        eval_freq: int = 10000,
+        log_path: Optional[str] = None,
+        best_model_save_path: Optional[str] = None,
+        deterministic: bool = True,
+        render: bool = False,
+        verbose: int = 1,
+        warn: bool = True,
+    ):
+        super().__init__(
+            eval_env=eval_env,
+            callback_on_new_best=callback_on_new_best,
+            n_eval_episodes=n_eval_episodes,
+            eval_freq=eval_freq,
+            log_path=log_path,
+            best_model_save_path=best_model_save_path,
+            deterministic=deterministic,
+            render=render,
+            verbose=verbose,
+            warn=warn,
+        )
+        self.start_time = time.time()
+    
+    def _on_step(self) -> bool:
+        if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
+            # Call parent evaluation method
+            parent_continue = super()._on_step()
+            
+            # Get additional metrics from the environment
+            try:
+                env_unwrapped = self.eval_env.envs[0].unwrapped
+                info = env_unwrapped._get_info()
+                
+                # Extract financial metrics
+                win_rate = info.get('win_rate', 0) * 100
+                portfolio_change = info.get('portfolio_change', 0) * 100
+                max_drawdown = info.get('max_drawdown', 0) * 100
+                total_trades = info.get('total_trades', 0)
+                sharpe_ratio = info.get('sharpe_ratio', 0)
+                sortino_ratio = info.get('sortino_ratio', 0)
+                
+                # Calculate elapsed time
+                elapsed = time.time() - self.start_time
+                elapsed_str = str(timedelta(seconds=int(elapsed)))
+                
+                # Log more detailed information
+                if self.verbose > 0:
+                    print(f"\n{'=' * 50}")
+                    print(f"Evaluation at {self.num_timesteps} timesteps ({elapsed_str})")
+                    print(f"Mean reward: {self.last_mean_reward:.2f}")
+                    print(f"Win rate: {win_rate:.2f}%")
+                    print(f"Portfolio change: {portfolio_change:.2f}%")
+                    print(f"Max drawdown: {max_drawdown:.2f}%")
+                    print(f"Total trades: {total_trades}")
+                    print(f"Sharpe ratio: {sharpe_ratio:.4f}")
+                    print(f"Sortino ratio: {sortino_ratio:.4f}")
+                    print(f"{'=' * 50}\n")
+            except:
+                # If failed to get additional metrics, just continue
+                pass
+            
+            return parent_continue
+        
+        return True
+
+
+class DetailedTrialEvalCallback(EvalCallback):
+    """
+    Callback for evaluating and pruning trials in Optuna with detailed logging.
+    
+    This callback extends EvalCallback to:
+    1. Report metrics to Optuna for pruning
+    2. Provide detailed feedback on evaluation metrics
+    3. Calculate and report financial metrics
+    """
+    
+    def __init__(
+        self,
+        eval_env: VecEnv,
+        trial: optuna.Trial,
+        n_eval_episodes: int = 5,
+        eval_freq: int = 10000,
+        log_path: Optional[str] = None,
+        best_model_save_path: Optional[str] = None,
+        deterministic: bool = True,
+        verbose: int = 1,
+    ):
+        super().__init__(
+            eval_env=eval_env,
+            n_eval_episodes=n_eval_episodes,
+            eval_freq=eval_freq,
+            log_path=log_path,
+            best_model_save_path=best_model_save_path,
+            deterministic=deterministic,
+            verbose=verbose,
+        )
+        self.trial = trial
+        self.is_pruned = False
+        self.eval_idx = 0
+        self.best_mean_reward = -np.inf
+        self.start_time = time.time()
+        
+        # Print header for evaluations
+        if self.verbose > 0:
+            print("\nEVALUATION METRICS DURING OPTIMIZATION")
+            print(f"{'Timesteps':<10} {'Reward':<10} {'Win Rate':<10} {'Profit %':<10} {'Drawdown':<10} {'Trades':<8} {'Sharpe':<8}")
+            print("-" * 70)
+    
+    def _on_step(self) -> bool:
+        if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
+            # Call original evaluation
+            continue_training = super()._on_step()
+            
+            # Report to Optuna for pruning
+            self.eval_idx += 1
+            self.trial.report(self.last_mean_reward, self.eval_idx)
+            
+            # Get additional metrics from the environment
+            try:
+                env_unwrapped = self.eval_env.envs[0].unwrapped
+                info = env_unwrapped._get_info()
+                
+                # Extract financial metrics
+                win_rate = info.get('win_rate', 0) * 100
+                portfolio_change = info.get('portfolio_change', 0) * 100
+                max_drawdown = info.get('max_drawdown', 0) * 100
+                total_trades = info.get('total_trades', 0)
+                sharpe_ratio = info.get('sharpe_ratio', 0)
+                sortino_ratio = info.get('sortino_ratio', 0)
+                
+                # Set additional attributes for the trial
+                self.trial.set_user_attr('win_rate', info.get('win_rate', 0))
+                self.trial.set_user_attr('portfolio_change', info.get('portfolio_change', 0))
+                self.trial.set_user_attr('max_drawdown', info.get('max_drawdown', 0))
+                self.trial.set_user_attr('total_trades', info.get('total_trades', 0))
+                self.trial.set_user_attr('sharpe_ratio', sharpe_ratio)
+                self.trial.set_user_attr('sortino_ratio', sortino_ratio)
+                
+                # Print metrics
+                if self.verbose > 0:
+                    print(f"{self.num_timesteps:<10} {self.last_mean_reward:<10.2f} {win_rate:<10.2f} {portfolio_change:<10.2f} {max_drawdown:<10.2f} {total_trades:<8} {sharpe_ratio:<8.2f}")
+            except:
+                # If metrics extraction fails, just print basic info
+                if self.verbose > 0:
+                    print(f"{self.num_timesteps:<10} {self.last_mean_reward:<10.2f}")
+            
+            # Prune trial if needed
+            if self.trial.should_prune():
+                self.is_pruned = True
+                if self.verbose > 0:
+                    print(f"Trial pruned at {self.num_timesteps} timesteps with reward {self.last_mean_reward:.2f}")
+                return False
+                
+            return continue_training
+        
+        return True
+
+
+class TrainingProgressCallback(BaseCallback):
+    """
+    Callback for tracking and displaying training progress.
+    
+    This callback shows a progress bar and statistics during training,
+    providing a better user experience than the default logging.
+    """
+    
+    def __init__(self, total_timesteps: int, update_interval: int = 10000, verbose: int = 1):
+        super().__init__(verbose)
+        self.total_timesteps = total_timesteps
+        self.update_interval = update_interval
+        self.start_time = time.time()
+        self.last_update_time = time.time()
+        self.last_timesteps = 0
+        
+        # Initialize tables for progress display
+        if self.verbose > 0:
+            print("\nTRAINING PROGRESS")
+            print("-" * 80)
+            print(f"{'Timesteps':<15} {'Progress':<10} {'Steps/s':<10} {'Elapsed':<15} {'ETA':<15}")
+            print("-" * 80)
+    
+    def _on_step(self) -> bool:
+        # Check if it's time to update the display
+        current_time = time.time()
+        if (self.num_timesteps - self.last_timesteps >= self.update_interval or 
+            current_time - self.last_update_time >= 30):  # At least every 30 seconds
+            
+            # Calculate progress percentage
+            progress = self.num_timesteps / self.total_timesteps * 100
+            
+            # Calculate steps per second
+            elapsed = current_time - self.start_time
+            steps_per_second = self.num_timesteps / max(elapsed, 1e-6)
+            
+            # Calculate ETA
+            remaining_steps = self.total_timesteps - self.num_timesteps
+            eta = remaining_steps / max(steps_per_second, 1e-6)
+            
+            # Format times
+            elapsed_str = str(timedelta(seconds=int(elapsed)))
+            eta_str = str(timedelta(seconds=int(eta)))
+            
+            # Print progress
+            if self.verbose > 0:
+                print(f"{self.num_timesteps}/{self.total_timesteps:<8} {progress:<9.1f}% {steps_per_second:<10.1f} {elapsed_str:<15} {eta_str:<15}")
+                
+            # Update last update time and timesteps
+            self.last_update_time = current_time
+            self.last_timesteps = self.num_timesteps
+            
+        return True
+    
+    def _on_training_end(self) -> None:
+        # Final progress update
+        if self.verbose > 0:
+            elapsed = time.time() - self.start_time
+            elapsed_str = str(timedelta(seconds=int(elapsed)))
+            steps_per_second = self.num_timesteps / max(elapsed, 1e-6)
+            
+            print("-" * 80)
+            print(f"Training completed: {self.num_timesteps}/{self.total_timesteps} steps in {elapsed_str} ({steps_per_second:.1f} steps/s)")
+            print("-" * 80)
+
+
+class IncrementalTrialCallback:
+    """
+    Callback to track progress across multiple trials in an optimization.
+    
+    This callback is designed to be passed to optuna.study.optimize() to
+    provide global progress tracking across all trials.
+    """
+    
+    def __init__(self, n_trials: int, update_interval: int = 1):
+        self.n_trials = n_trials
+        self.completed_trials = 0
+        self.best_value = float('-inf')
+        self.best_trial_number = None
+        self.start_time = time.time()
+        self.last_update = time.time()
+        self.update_interval = update_interval
+        
+        # Print header
+        print("\n" + "=" * 80)
+        print(f"OPTUNA OPTIMIZATION PROGRESS ({n_trials} trials)")
+        print("=" * 80)
+        print(f"{'Trial':<8} {'Value':<10} {'Win Rate':<10} {'Profit %':<10} {'Drawdown':<10} {'Sharpe':<8} {'Time':<10}")
+        print("-" * 80)
+    
+    def __call__(self, study: optuna.study.Study, trial: optuna.trial.Trial) -> None:
+        # Update completion count
+        self.completed_trials += 1
+        
+        # Get trial attributes
+        value = trial.value if trial.value is not None else float('nan')
+        win_rate = trial.user_attrs.get('win_rate', 0) * 100
+        portfolio_change = trial.user_attrs.get('portfolio_change', 0) * 100
+        max_drawdown = trial.user_attrs.get('max_drawdown', 0) * 100
+        sharpe_ratio = trial.user_attrs.get('sharpe_ratio', 0)
+        
+        # Calculate elapsed time for this trial
+        elapsed = time.time() - self.last_update
+        elapsed_str = str(timedelta(seconds=int(elapsed)))
+        
+        # Update best value
+        is_best = False
+        if value is not None and value > self.best_value:
+            self.best_value = value
+            self.best_trial_number = trial.number
+            is_best = True
+        
+        # Print progress
+        best_marker = " ⭐" if is_best else ""
+        print(f"{trial.number+1}/{self.n_trials:<3} {value:<10.4f} {win_rate:<10.2f} {portfolio_change:<10.2f} {max_drawdown:<10.2f} {sharpe_ratio:<8.2f} {elapsed_str:<10}{best_marker}")
+        
+        # Update last update time
+        self.last_update = time.time()
+    
+    def finalize(self) -> None:
+        # Print final summary
+        elapsed = time.time() - self.start_time
+        elapsed_str = str(timedelta(seconds=int(elapsed)))
+        
+        print("-" * 80)
+        print(f"Optimization completed: {self.completed_trials}/{self.n_trials} trials in {elapsed_str}")
+        if self.best_trial_number is not None:
+            print(f"Best trial: #{self.best_trial_number+1} with value {self.best_value:.4f}")
+        print("=" * 80 + "\n")
+
 
 def make_enhanced_env(data: pd.DataFrame, config: Dict) -> DummyVecEnv:
     """
@@ -304,15 +625,8 @@ def run_enhanced_optimization(
     Returns:
         Dict: Optimization results
     """
-    import optuna
-    from optuna.pruners import MedianPruner
-    from optuna.samplers import TPESampler
-    from stable_baselines3 import PPO
-    from stable_baselines3.common.callbacks import EvalCallback, StopTrainingOnNoModelImprovement
-    from stable_baselines3.common.evaluation import evaluate_policy
-    import time
-    import json
-    import datetime
+    
+
     
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
@@ -365,6 +679,11 @@ def run_enhanced_optimization(
             
             return True
     
+
+    
+
+
+
     # Define function to calculate financial metrics
     def calculate_financial_metrics(env):
         """Calculate financial metrics from environment."""
