@@ -321,8 +321,8 @@ def custom_run_enhanced_optimization(
         trial_config.update(env_params)
         
         # Create environments
-        env = make_enhanced_env(data, trial_config)
-        eval_env = make_enhanced_env(data, trial_config)
+        env = make_enhanced_env(data, trial_config, False)
+        eval_env = make_enhanced_env(data, trial_config, True)
         
         # Create policy kwargs
         policy_kwargs = {
@@ -795,7 +795,7 @@ def main():
     parser.add_argument('--config', type=str, default='config/lstm_config.json', help='Path to configuration file')
     parser.add_argument('--data-file', type=str, default='data/processed/MSFT_processed.csv', help='Path to data file (optional)')
     parser.add_argument('--lookback-days', type=int, default=730, help='Number of days to look back for data')
-    parser.add_argument('--timesteps', type=int, default=50000, help='Number of timesteps for training')
+    parser.add_argument('--timesteps', type=int, default=100000, help='Number of timesteps for training')
     parser.add_argument('--enable-optuna', action='store_true', default=True, help='Enable Optuna optimization')
     parser.add_argument('--n-trials', type=int, default=20, help='Number of Optuna trials')
     parser.add_argument('--n-jobs', type=int, default=1, help='Number of parallel jobs for Optuna')

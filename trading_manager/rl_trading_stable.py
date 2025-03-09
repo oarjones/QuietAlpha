@@ -482,7 +482,6 @@ class SimpleTradingEnv(gym.Env):
             'avg_entry_price': self.avg_entry_price
         }
 
-
 class EnhancedTradingEnv(gym.Env):
     """
     Enhanced trading environment with improved reward function and sophisticated metrics.
@@ -581,19 +580,6 @@ class EnhancedTradingEnv(gym.Env):
         self.unrealized_profit = 0
         
         # Extract feature columns (indicators)
-        self.features = []
-        # for col in data.columns:
-        #     # Include normalized features and trend indicators
-        #     if ('_norm' in col or 'Trend' in col) and col not in ['datetime', 'open', 'high', 'low', 'close', 'volume']:
-        #         self.features.append(col)
-        
-        # # If no features are found, use a default set
-        # if not self.features:
-        #     self.features = [
-        #         'close_norm', 'volume_norm',
-        #         'TrendStrength_norm', 'RSI_14_norm', 'MACD_diff_norm'
-        #     ]
-
         self.features = [
             'open_norm',
             'high_norm',
@@ -656,6 +642,83 @@ class EnhancedTradingEnv(gym.Env):
         
         logger.info(f"EnhancedTradingEnv initialized with {len(data)} data points, "
                    f"initial balance: {initial_balance}, max position: {max_position}")
+    
+    def get_state(self) -> Dict:
+        """
+        Get the current state of the environment for later restoration.
+        
+        Returns:
+            Dict: Current state dictionary
+        """
+        return {
+            'balance': self.balance,
+            'position': self.position,
+            'current_step': self.current_step,
+            'current_price': self.current_price,
+            'next_price': self.next_price,
+            'avg_entry_price': self.avg_entry_price,
+            'portfolio_value': self.portfolio_value,
+            'consecutive_wins': self.consecutive_wins,
+            'consecutive_losses': self.consecutive_losses,
+            'max_consecutive_wins': self.max_consecutive_wins,
+            'max_consecutive_losses': self.max_consecutive_losses,
+            'last_trade_step': self.last_trade_step,
+            'consecutive_holds': self.consecutive_holds,
+            'last_action': self.last_action,
+            'in_position_steps': self.in_position_steps,
+            'total_position_steps': self.total_position_steps,
+            'unrealized_profit': self.unrealized_profit,
+            'total_trades': self.total_trades,
+            'winning_trades': self.winning_trades,
+            'losing_trades': self.losing_trades,
+            'max_drawdown': self.max_drawdown,
+            'current_drawdown': self.current_drawdown,
+            'peak_portfolio_value': self.peak_portfolio_value,
+            'total_reward': self.total_reward,
+            'done': self.done
+        }
+    
+    def set_state(self, state: Dict) -> None:
+        """
+        Restore the environment to a previous state.
+        
+        Args:
+            state (Dict): State dictionary from get_state()
+        """
+        self.balance = state['balance']
+        self.position = state['position']
+        self.current_step = state['current_step']
+        self.current_price = state['current_price']
+        self.next_price = state.get('next_price', self.current_price)
+        self.avg_entry_price = state['avg_entry_price']
+        self.portfolio_value = state['portfolio_value']
+        self.consecutive_wins = state['consecutive_wins']
+        self.consecutive_losses = state['consecutive_losses']
+        self.max_consecutive_wins = state['max_consecutive_wins']
+        self.max_consecutive_losses = state['max_consecutive_losses']
+        self.last_trade_step = state['last_trade_step']
+        self.consecutive_holds = state['consecutive_holds']
+        self.last_action = state['last_action']
+        self.in_position_steps = state['in_position_steps']
+        self.total_position_steps = state['total_position_steps']
+        self.unrealized_profit = state['unrealized_profit']
+        self.total_trades = state['total_trades']
+        self.winning_trades = state['winning_trades']
+        self.losing_trades = state['losing_trades']
+        self.max_drawdown = state['max_drawdown']
+        self.current_drawdown = state['current_drawdown']
+        self.peak_portfolio_value = state['peak_portfolio_value']
+        self.total_reward = state['total_reward']
+        self.done = state['done']
+    
+    def get_unwrapped(self):
+        """
+        Get a reference to the unwrapped environment.
+        
+        Returns:
+            EnhancedTradingEnv: The unwrapped environment
+        """
+        return self
     
     def reset(self, seed=None, options=None):
         """
@@ -736,6 +799,7 @@ class EnhancedTradingEnv(gym.Env):
             self.done = True
             return self._get_observation(), 0, True, False, self._get_info()
         
+                
         # Get current market data
         current_data = self.data.iloc[self.current_step]
         next_data = self.data.iloc[self.current_step + 1]
@@ -1258,8 +1322,6 @@ class EnhancedTradingEnv(gym.Env):
             'total_reward': self.total_reward,
             'reward_components': self.reward_components,
         }
-
-
 
 
 class TensorboardCallback(BaseCallback):
