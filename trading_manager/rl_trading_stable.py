@@ -12,10 +12,11 @@ import numpy as np
 import pandas as pd
 import gymnasium as gym
 from gymnasium import spaces
-from typing import List, Dict, Optional, Tuple, Union
+from typing import List, Dict, Optional, Tuple, Union, Any
 import datetime
 import time
 from threading import Lock
+from collections import deque
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
@@ -480,6 +481,785 @@ class SimpleTradingEnv(gym.Env):
             'portfolio_change': portfolio_change,
             'avg_entry_price': self.avg_entry_price
         }
+
+
+class EnhancedTradingEnv(gym.Env):
+    """
+    Enhanced trading environment with improved reward function and sophisticated metrics.
+    
+    This environment refines the SimpleTradingEnv with a more nuanced reward function
+    that balances risk-reward tradeoffs and supports multiple trading objectives.
+    """
+    
+    def __init__(
+        self, 
+        data: pd.DataFrame, 
+        initial_balance: float = 10000.0,
+        max_position: int = 20, 
+        transaction_fee: float = 0.001,
+        reward_scaling: float = 1.0,
+        window_size: int = 60,
+        reward_strategy: str = 'balanced',  # Options: 'simple', 'sharpe', 'sortino', 'balanced'
+        risk_free_rate: float = 0.0,
+        risk_aversion: float = 1.0,
+        # New parameters for enhanced reward function
+        drawdown_penalty_factor: float = 15.0,
+        holding_penalty_factor: float = 0.1,
+        inactive_penalty_factor: float = 0.05,
+        consistency_reward_factor: float = 0.2,
+        trend_following_factor: float = 0.3,
+        win_streak_factor: float = 0.1
+    ):
+        """
+        Initialize the enhanced trading environment.
+        
+        Args:
+            data (pd.DataFrame): Historical price data with technical indicators
+            initial_balance (float): Starting account balance
+            max_position (int): Maximum position size
+            transaction_fee (float): Fee per transaction as a fraction of trade value
+            reward_scaling (float): Scaling factor for reward values
+            window_size (int): Size of the observation window
+            reward_strategy (str): Strategy for reward calculation
+            risk_free_rate (float): Risk-free rate for Sharpe ratio calculation
+            risk_aversion (float): Risk aversion coefficient (higher = more risk averse)
+            drawdown_penalty_factor (float): Multiplier for drawdown penalties
+            holding_penalty_factor (float): Multiplier for holding penalties
+            inactive_penalty_factor (float): Multiplier for inactivity penalties
+            consistency_reward_factor (float): Multiplier for consistency rewards
+            trend_following_factor (float): Multiplier for trend-following rewards
+            win_streak_factor (float): Multiplier for consecutive win rewards
+        """
+        super(EnhancedTradingEnv, self).__init__()
+        
+        # Store configuration
+        self.data = data
+        self.initial_balance = initial_balance
+        self.max_position = max_position
+        self.transaction_fee = transaction_fee
+        self.reward_scaling = reward_scaling
+        self.window_size = window_size
+        self.reward_strategy = reward_strategy
+        self.risk_free_rate = risk_free_rate
+        self.risk_aversion = risk_aversion
+        
+        # Enhanced reward parameters
+        self.drawdown_penalty_factor = drawdown_penalty_factor
+        self.holding_penalty_factor = holding_penalty_factor
+        self.inactive_penalty_factor = inactive_penalty_factor
+        self.consistency_reward_factor = consistency_reward_factor
+        self.trend_following_factor = trend_following_factor
+        self.win_streak_factor = win_streak_factor
+        
+        # State variables
+        self.balance = initial_balance
+        self.position = 0  # Current position (number of shares)
+        self.current_step = 0
+        self.current_price = 0
+        self.next_price = 0
+        self.avg_entry_price = 0  # Track average entry price for P&L calculation
+        self.trades = []
+        self.portfolio_value = initial_balance
+        self.portfolio_values = []  # Track portfolio value over time
+        self.daily_returns = []     # Track daily returns for Sharpe ratio
+        self.done = False
+        
+        # Windows for tracking metrics
+        self.return_window = deque(maxlen=window_size)  # For rolling returns
+        self.price_window = deque(maxlen=window_size)   # For tracking price trends
+        
+        # Additional trading metrics trackers
+        self.consecutive_wins = 0
+        self.consecutive_losses = 0
+        self.max_consecutive_wins = 0
+        self.max_consecutive_losses = 0
+        self.last_trade_step = 0
+        self.consecutive_holds = 0
+        self.last_action = 0  # 0 = hold, 1 = buy, 2 = sell
+        self.in_position_steps = 0
+        self.total_position_steps = 0
+        self.unrealized_profit = 0
+        
+        # Extract feature columns (indicators)
+        self.features = []
+        # for col in data.columns:
+        #     # Include normalized features and trend indicators
+        #     if ('_norm' in col or 'Trend' in col) and col not in ['datetime', 'open', 'high', 'low', 'close', 'volume']:
+        #         self.features.append(col)
+        
+        # # If no features are found, use a default set
+        # if not self.features:
+        #     self.features = [
+        #         'close_norm', 'volume_norm',
+        #         'TrendStrength_norm', 'RSI_14_norm', 'MACD_diff_norm'
+        #     ]
+
+        self.features = [
+            'open_norm',
+            'high_norm',
+            'low_norm',
+            'close_norm',
+            'volume_norm',
+            'VWAP_norm',
+            'EMA_8_norm',
+            'EMA_21_norm',
+            'SMA_34_norm',
+            'SMA_50_norm',
+            'SMA_200_norm',
+            'MACD_line_norm',
+            'MACD_signal_norm',
+            'MACD_diff_norm',
+            'RSI_14_norm',
+            'Stoch_k_norm',
+            'Stoch_d_norm',
+            'ATR_14_norm',
+            'ATR_5_norm',
+            'ADX_14_norm',
+            'TrendStrength_norm'
+        ]
+        
+        # Define observation space (state space)
+        # Includes technical indicators + position + balance + price history
+        self.obs_dim = len(self.features) + 5  # +5 for position, balance, unrealized PnL, win streak, recent volatility
+        self.observation_space = spaces.Box(
+            low=-np.inf, high=np.inf, shape=(self.obs_dim,), dtype=np.float32
+        )
+        
+        # Define action space: 0 = hold, 1 = buy, 2 = sell
+        self.action_space = spaces.Discrete(3)
+        
+        # Trading session stats
+        self.total_trades = 0
+        self.winning_trades = 0
+        self.losing_trades = 0
+        self.max_drawdown = 0
+        self.current_drawdown = 0
+        self.peak_portfolio_value = initial_balance
+        self.trade_history = []
+        
+        # Performance tracking
+        self.episode_returns = []
+        self.total_reward = 0
+        self.reward_components = {
+            'action_reward': 0,
+            'portfolio_performance': 0,
+            'holding_penalty': 0,
+            'drawdown_penalty': 0,
+            'consistency_reward': 0,
+            'trend_following': 0,
+            'inactivity_penalty': 0,
+            'win_streak_reward': 0
+        }
+        
+        # Reset on init
+        self.reset()
+        
+        logger.info(f"EnhancedTradingEnv initialized with {len(data)} data points, "
+                   f"initial balance: {initial_balance}, max position: {max_position}")
+    
+    def reset(self, seed=None, options=None):
+        """
+        Reset the environment to initial state.
+        
+        Returns:
+            observation: Initial state
+            info: Additional information
+        """
+        super().reset(seed=seed)
+        
+        # Reset state variables
+        self.balance = self.initial_balance
+        self.position = 0
+        self.current_step = 0
+        self.current_price = self.data['close'].iloc[0]
+        self.next_price = self.current_price
+        self.avg_entry_price = 0
+        self.trades = []
+        self.portfolio_value = self.initial_balance
+        self.portfolio_values = [self.initial_balance]
+        self.daily_returns = []
+        self.done = False
+        
+        # Reset return window
+        self.return_window.clear()
+        self.price_window.clear()
+        self.price_window.append(self.current_price)
+        
+        # Reset trading metrics
+        self.consecutive_wins = 0
+        self.consecutive_losses = 0
+        self.max_consecutive_wins = 0
+        self.max_consecutive_losses = 0
+        self.last_trade_step = 0
+        self.consecutive_holds = 0
+        self.last_action = 0
+        self.in_position_steps = 0
+        self.total_position_steps = 0
+        self.unrealized_profit = 0
+        
+        # Reset statistics
+        self.total_trades = 0
+        self.winning_trades = 0
+        self.losing_trades = 0
+        self.max_drawdown = 0
+        self.current_drawdown = 0
+        self.peak_portfolio_value = self.initial_balance
+        self.trade_history = []
+        self.total_reward = 0
+        
+        # Reset reward components
+        for key in self.reward_components:
+            self.reward_components[key] = 0
+        
+        # Get initial observation
+        observation = self._get_observation()
+        info = self._get_info()
+        
+        return observation, info
+    
+    def step(self, action):
+        """
+        Take a step in the environment with enhanced reward calculation.
+        
+        Args:
+            action: 0 = hold, 1 = buy, 2 = sell
+            
+        Returns:
+            observation: New state
+            reward: Reward for this step
+            done: Whether the episode is done
+            truncated: Whether the episode was truncated
+            info: Additional information
+        """
+        # Ensure current step is valid
+        if self.current_step >= len(self.data) - 1:
+            self.done = True
+            return self._get_observation(), 0, True, False, self._get_info()
+        
+        # Get current market data
+        current_data = self.data.iloc[self.current_step]
+        next_data = self.data.iloc[self.current_step + 1]
+        
+        # Update current price and next price
+        self.current_price = current_data['close']
+        self.next_price = next_data['close']
+        
+        # Add price to price window
+        self.price_window.append(self.current_price)
+        
+        # Calculate portfolio value before action
+        portfolio_value_before = self.balance + self.position * self.current_price
+        
+        # Calculate unrealized profit if in position
+        if self.position > 0:
+            self.unrealized_profit = (self.current_price - self.avg_entry_price) * self.position
+            self.in_position_steps += 1
+            self.total_position_steps += 1
+        
+        # Initialize reward components
+        action_reward = 0
+        holding_penalty = 0
+        drawdown_penalty = 0
+        inactivity_penalty = 0
+        portfolio_performance_reward = 0
+        consistency_reward = 0
+        trend_following_reward = 0
+        win_streak_reward = 0
+        
+        # Process the action
+        action_taken = False  # Flag to track if a meaningful action was taken
+        
+        # --- HOLD ACTION ---
+        if action == 0:  # Hold
+            # Increment consecutive holds counter
+            self.consecutive_holds += 1
+            
+            # Apply holding penalty for excessive holding
+            if self.consecutive_holds > 10:
+                # Sigmoid-like scaling of penalty - increases slowly then more rapidly
+                hold_factor = min((self.consecutive_holds - 10) / 30, 1.0)
+                holding_penalty = self.holding_penalty_factor * hold_factor
+                
+                # Extra penalty if market is moving significantly but we're not acting
+                price_change_pct = abs(self.next_price - self.current_price) / self.current_price
+                if price_change_pct > 0.01:  # 1% price move
+                    volatility_penalty = 0.05 * min(price_change_pct / 0.01, 3.0)  # Scale with volatility, cap at 3x
+                    holding_penalty += volatility_penalty
+                
+                # If holding cash for too long (no position), apply additional mild penalty
+                if self.position == 0 and self.consecutive_holds > 20:
+                    cash_penalty = 0.02 * min((self.consecutive_holds - 20) / 20, 1.0)
+                    holding_penalty += cash_penalty
+                
+                # ENHANCED: Consider trend direction when penalizing holds
+                if len(self.price_window) >= 3:
+                    short_trend = self.price_window[-1] > self.price_window[-3]  # Uptrend in last 3 steps
+                    
+                    # Penalize more for holding cash during uptrends
+                    if self.position == 0 and short_trend:
+                        holding_penalty += 0.01
+                    
+                    # Penalize more for holding position during downtrends
+                    if self.position > 0 and not short_trend:
+                        holding_penalty += 0.01
+        else:
+            # Reset consecutive holds counter on any other action
+            self.consecutive_holds = 0
+        
+        # --- BUY ACTION ---
+        if action == 1:  # Buy
+            # Calculate how many shares we can buy
+            max_new_shares = int(self.balance / (self.current_price * (1 + self.transaction_fee)))
+            
+            # Limit position size
+            available_capacity = self.max_position - self.position
+            position_size = min(max_new_shares, available_capacity)
+            
+            if position_size > 0:
+                # Calculate trade cost
+                trade_cost = position_size * self.current_price * self.transaction_fee
+                trade_value = position_size * self.current_price
+                
+                # Update average entry price if we already have a position
+                if self.position > 0:
+                    # Calculate weighted average price
+                    total_position = self.position + position_size
+                    self.avg_entry_price = (
+                        (self.position * self.avg_entry_price + position_size * self.current_price) /
+                        total_position
+                    )
+                else:
+                    # First purchase
+                    self.avg_entry_price = self.current_price
+                
+                # Execute trade
+                self.balance -= (trade_value + trade_cost)
+                self.position += position_size
+                
+                # Record trade
+                trade_record = {
+                    'step': self.current_step,
+                    'type': 'buy',
+                    'price': self.current_price,
+                    'quantity': position_size,
+                    'cost': trade_cost,
+                    'avg_entry_price': self.avg_entry_price,
+                    'portfolio_value': self.portfolio_value
+                }
+                self.trades.append(trade_record)
+                self.trade_history.append(trade_record)
+                
+                self.total_trades += 1
+                action_taken = True
+                
+                # ENHANCED: Trend following reward
+                if len(self.price_window) >= 5:
+                    # Check if price is in short-term uptrend (higher than 5 steps ago)
+                    if self.current_price > self.price_window[0]:
+                        # Reward for buying in uptrend (trend following)
+                        trend_following_reward = self.trend_following_factor
+                    else:
+                        # Small penalty for buying in downtrend (contrarian)
+                        trend_following_reward = -self.trend_following_factor * 0.5
+                
+                # Small positive reward for taking action after long holding period
+                if self.consecutive_holds > 15:
+                    action_reward += 0.1
+                
+                # Reset last trade step
+                self.last_trade_step = self.current_step
+                self.last_action = 1
+                
+                logger.debug(f"Buy: {position_size} shares at {self.current_price:.2f}, " +
+                            f"new total position: {self.position}, avg price: {self.avg_entry_price:.2f}")
+            else:
+                # Tried to buy but couldn't (no funds or at max position)
+                # Small penalty for attempting invalid action
+                inactivity_penalty = 0.05
+        
+        # --- SELL ACTION ---
+        elif action == 2:  # Sell
+            # Only sell if we have a position
+            if self.position > 0:
+                # Calculate trade cost
+                trade_cost = self.position * self.current_price * self.transaction_fee
+                
+                # Calculate profit/loss based on average entry price
+                position_value = self.position * self.current_price
+                entry_value = self.position * self.avg_entry_price
+                profit_loss = position_value - entry_value - trade_cost
+                
+                # Execute trade
+                self.balance += position_value - trade_cost
+                
+                # Record trade
+                trade_record = {
+                    'step': self.current_step,
+                    'type': 'sell',
+                    'price': self.current_price,
+                    'quantity': self.position,
+                    'cost': trade_cost,
+                    'profit_loss': profit_loss,
+                    'portfolio_value': self.portfolio_value
+                }
+                self.trades.append(trade_record)
+                self.trade_history.append(trade_record)
+                
+                # Update win/loss stats
+                if profit_loss > 0:
+                    self.winning_trades += 1
+                    self.consecutive_wins += 1
+                    self.consecutive_losses = 0
+                    
+                    # Update max consecutive wins
+                    self.max_consecutive_wins = max(self.max_consecutive_wins, self.consecutive_wins)
+                    
+                    # ENHANCED: Win streak reward - encourage consistent wins
+                    if self.consecutive_wins >= 2:
+                        win_streak_reward = self.win_streak_factor * min(self.consecutive_wins, 5)
+                else:
+                    self.losing_trades += 1
+                    self.consecutive_losses += 1
+                    self.consecutive_wins = 0
+                    
+                    # Update max consecutive losses
+                    self.max_consecutive_losses = max(self.max_consecutive_losses, self.consecutive_losses)
+                
+                # Calculate reward based on profit/loss relative to investment
+                position_cost = entry_value + trade_cost
+                if position_cost > 0:  # Avoid division by zero
+                    # Scale the profit/loss reward to keep it in a reasonable range
+                    # Apply tanh to limit extreme values while preserving sign
+                    profit_loss_pct = profit_loss / position_cost
+                    action_reward = np.tanh(profit_loss_pct * 5) * 0.5  # Scale to [-0.5, 0.5] range
+                
+                # ENHANCED: Trend following reward
+                if len(self.price_window) >= 5:
+                    # Check if price is in short-term downtrend
+                    if self.current_price < self.price_window[0]:
+                        # Reward for selling in downtrend (trend following)
+                        trend_following_reward = self.trend_following_factor
+                    else:
+                        # Small penalty for selling in uptrend (contrarian)
+                        trend_following_reward = -self.trend_following_factor * 0.5
+                
+                # Small positive reward for taking action after long holding period
+                if self.consecutive_holds > 15:
+                    action_reward += 0.1
+                
+                action_taken = True
+                logger.debug(f"Sell: {self.position} shares at {self.current_price:.2f}, P&L: {profit_loss:.2f}")
+                
+                # Reset position
+                self.position = 0
+                self.avg_entry_price = 0
+                self.unrealized_profit = 0
+                self.in_position_steps = 0
+                
+                # Reset last trade step
+                self.last_trade_step = self.current_step
+                self.last_action = 2
+                
+                self.total_trades += 1
+            else:
+                # Tried to sell but no position
+                # Small penalty for attempting invalid action
+                inactivity_penalty = 0.05
+        
+        # Move to the next time step
+        self.current_step += 1
+        
+        # Calculate portfolio value after action and step
+        self.portfolio_value = self.balance + self.position * self.next_price
+        self.portfolio_values.append(self.portfolio_value)
+        
+        # Calculate daily return (assuming each step is a day, adjust if using different timeframes)
+        if len(self.portfolio_values) >= 2:
+            daily_return = (self.portfolio_values[-1] / self.portfolio_values[-2]) - 1
+            self.return_window.append(daily_return)
+            self.daily_returns.append(daily_return)
+        
+        # Update peak portfolio value and calculate drawdown
+        if self.portfolio_value > self.peak_portfolio_value:
+            self.peak_portfolio_value = self.portfolio_value
+        
+        self.current_drawdown = 0
+        if self.peak_portfolio_value > 0:
+            self.current_drawdown = (self.peak_portfolio_value - self.portfolio_value) / self.peak_portfolio_value
+            self.max_drawdown = max(self.max_drawdown, self.current_drawdown)
+        
+        # ENHANCED: Apply more sophisticated drawdown penalty
+        if self.current_drawdown > 0.03:  # More than 3% drawdown
+            # Progressive penalty that increases more rapidly with larger drawdowns
+            drawdown_penalty = self.drawdown_penalty_factor * (self.current_drawdown**2)
+            
+            # Add extra penalty for new max drawdowns
+            if self.current_drawdown >= self.max_drawdown * 0.95:  # Within 5% of max drawdown
+                drawdown_penalty *= 1.5
+        
+        # Calculate portfolio performance reward if no explicit reward from selling
+        if action_reward == 0:
+            # Calculate portfolio value change
+            portfolio_value_after = self.balance + self.position * self.next_price
+            portfolio_return = (portfolio_value_after - portfolio_value_before) / portfolio_value_before
+            
+            # Scale reward to a reasonable range using tanh
+            portfolio_performance_reward = np.tanh(portfolio_return * 5) * 0.2  # Scale to [-0.2, 0.2] range
+            
+            # ENHANCED: Consistency reward based on return stability
+            if len(self.return_window) > 3:
+                # Calculate volatility of recent returns
+                return_volatility = np.std(self.return_window)
+                mean_return = np.mean(self.return_window)
+                
+                # If mean return is positive and volatility is low, reward consistency
+                if mean_return > 0 and return_volatility < 0.01:  # Low volatility
+                    consistency_reward = self.consistency_reward_factor * (1 - return_volatility*100)
+                    
+                # If mean return is negative, no consistency reward
+                elif mean_return < 0:
+                    consistency_reward = 0
+            
+            # Add small bonus/penalty for being in the market during price movements
+            if self.position > 0:
+                if portfolio_return > 0:
+                    portfolio_performance_reward += 0.02  # Small bonus for catching uptrend
+                elif portfolio_return < 0:
+                    portfolio_performance_reward -= 0.02  # Small penalty for getting caught in downtrend
+        
+        # Apply inactivity penalty for long periods without trades
+        inactivity_penalty = 0
+        
+        if not action_taken and hasattr(self, 'last_trade_step'):            
+            # Increasing penalty for long periods without trading
+            inactivity_duration = self.current_step - self.last_trade_step
+            if inactivity_duration > 50:  # Arbitrary threshold
+                inactivity_factor = min((inactivity_duration - 50) / 100, 1.0)
+                inactivity_penalty = self.inactive_penalty_factor * inactivity_factor
+        
+        # ENHANCED: Apply reward strategy based on selected mode
+        if self.reward_strategy == 'sharpe':
+            # Calculate Sharpe ratio based reward if we have enough returns
+            if len(self.return_window) > 10:
+                mean_return = np.mean(self.return_window)
+                std_return = np.std(self.return_window) + 1e-6  # Avoid division by zero
+                
+                # Calculate rolling Sharpe ratio (not annualized)
+                sharpe = (mean_return - self.risk_free_rate) / std_return
+                
+                # Reward is primarily based on Sharpe ratio
+                reward = np.tanh(sharpe * 2) * self.reward_scaling
+                
+                # Add small component of direct return
+                reward += portfolio_performance_reward * 0.5
+                
+                # Still apply penalties for bad actions
+                reward -= (holding_penalty + inactivity_penalty + drawdown_penalty)
+            else:
+                # Not enough data for Sharpe yet, use standard reward
+                reward = portfolio_performance_reward
+                reward -= (holding_penalty + inactivity_penalty + drawdown_penalty)
+        
+        elif self.reward_strategy == 'sortino':
+            # Calculate Sortino ratio based reward (penalizes only downside volatility)
+            if len(self.return_window) > 10:
+                mean_return = np.mean(self.return_window)
+                
+                # Calculate downside deviation (standard deviation of negative returns only)
+                negative_returns = [r for r in self.return_window if r < 0]
+                downside_std = np.std(negative_returns) if negative_returns else 1e-6
+                
+                # Calculate rolling Sortino ratio
+                sortino = (mean_return - self.risk_free_rate) / downside_std
+                
+                # Reward is primarily based on Sortino ratio
+                reward = np.tanh(sortino * 2) * self.reward_scaling
+                
+                # Add components for other behaviors
+                reward += action_reward
+                reward -= (holding_penalty + inactivity_penalty + drawdown_penalty)
+            else:
+                # Not enough data for Sortino yet, use standard reward
+                reward = action_reward + portfolio_performance_reward
+                reward -= (holding_penalty + inactivity_penalty + drawdown_penalty)
+        
+        elif self.reward_strategy == 'balanced':
+            # Most sophisticated reward function that balances all components
+            # Combine all reward components with careful weighting
+            reward = (
+                action_reward * 1.0 +                   # Trading profit/loss
+                portfolio_performance_reward * 0.8 +    # Overall portfolio performance
+                consistency_reward * 0.5 +              # Reward stability
+                trend_following_reward * 0.7 +          # Reward trend alignment
+                win_streak_reward * 0.6 -               # Reward consecutive wins
+                holding_penalty * 0.5 -                 # Penalize excessive holding
+                inactivity_penalty * 0.4 -              # Penalize inactivity
+                drawdown_penalty * 1.0                  # Heavily penalize drawdowns
+            )
+            
+            # Apply risk aversion factor to modify penalty weight
+            # Higher risk_aversion means more weight to penalties
+            if self.risk_aversion > 1.0:
+                # Increase weight of penalties
+                reward = (
+                    reward - 
+                    (drawdown_penalty * (self.risk_aversion - 1) * 0.5)
+                )
+            elif self.risk_aversion < 1.0:
+                # Decrease weight of penalties
+                reward = (
+                    reward + 
+                    (action_reward * (1 - self.risk_aversion) * 0.5)
+                )
+        
+        else:  # 'simple' strategy or default
+            # Simple reward function similar to original
+            reward = (
+                action_reward +
+                portfolio_performance_reward -
+                holding_penalty -
+                inactivity_penalty -
+                drawdown_penalty
+            )
+        
+        # Apply final scaling to keep reward in a reasonable range
+        reward = np.clip(reward, -2.0, 2.0) * self.reward_scaling
+        
+        # Update total reward
+        self.total_reward += reward
+        
+        # Store reward components for analysis
+        self.reward_components['action_reward'] += action_reward
+        self.reward_components['portfolio_performance'] += portfolio_performance_reward
+        self.reward_components['holding_penalty'] += holding_penalty
+        self.reward_components['drawdown_penalty'] += drawdown_penalty
+        self.reward_components['consistency_reward'] += consistency_reward
+        self.reward_components['trend_following'] += trend_following_reward
+        self.reward_components['inactivity_penalty'] += inactivity_penalty
+        self.reward_components['win_streak_reward'] += win_streak_reward
+        
+        # Check if we're done
+        self.done = self.current_step >= len(self.data) - 1
+        
+        # Return results
+        next_observation = self._get_observation()
+        info = self._get_info()
+        
+        return next_observation, reward, self.done, False, info
+    
+    def _get_observation(self):
+        """
+        Get enhanced observation with additional features.
+        
+        Returns:
+            numpy.ndarray: Current state representation
+        """
+        if self.current_step >= len(self.data):
+            self.current_step = len(self.data) - 1
+        
+        # Get current feature values from data
+        features = self.data.iloc[self.current_step][self.features].values
+        
+        # Normalize position to [-1, 1]
+        normalized_position = self.position / self.max_position
+        
+        # Normalize balance relative to initial balance
+        normalized_balance = self.balance / self.initial_balance - 1.0
+        
+        # Calculate unrealized PnL ratio if in position
+        unrealized_pnl_ratio = 0.0
+        if self.position > 0 and self.avg_entry_price > 0:
+            unrealized_pnl_ratio = (self.current_price / self.avg_entry_price) - 1.0
+            # Clip to reasonable range
+            unrealized_pnl_ratio = np.clip(unrealized_pnl_ratio, -1.0, 1.0)
+        
+        # Calculate win streak feature (normalized)
+        win_streak = self.consecutive_wins / 5  # Normalize to reasonable range
+        win_streak = np.clip(win_streak, 0, 1.0)
+        
+        # Calculate recent volatility
+        recent_volatility = 0.0
+        if len(self.price_window) > 5:
+            # Calculate normalized volatility as std dev of recent prices
+            recent_prices = list(self.price_window)[-5:]
+            mean_price = np.mean(recent_prices)
+            std_price = np.std(recent_prices)
+            recent_volatility = std_price / mean_price if mean_price > 0 else 0.0
+            recent_volatility = np.clip(recent_volatility * 10, 0, 1.0)  # Scale and clip
+        
+        # Combine features with additional state information
+        obs = np.hstack([
+            features, 
+            [normalized_position, normalized_balance, unrealized_pnl_ratio, win_streak, recent_volatility]
+        ])
+        
+        return obs.astype(np.float32)
+    
+    def _get_info(self):
+        """
+        Get detailed information about the current state.
+        
+        Returns:
+            dict: Information about the current state
+        """
+        # Calculate win rate
+        win_rate = 0
+        if self.total_trades > 0:
+            win_rate = self.winning_trades / self.total_trades
+        
+        # Calculate portfolio change
+        portfolio_change = (self.portfolio_value - self.initial_balance) / self.initial_balance
+        
+        # Calculate Sharpe ratio if we have enough daily returns
+        sharpe_ratio = 0
+        if len(self.daily_returns) > 10:
+            returns_array = np.array(self.daily_returns)
+            excess_returns = returns_array - (self.risk_free_rate / 252)  # Daily risk-free rate
+            sharpe_ratio = np.mean(excess_returns) / (np.std(excess_returns) + 1e-6) * np.sqrt(252)  # Annualized
+        
+        # Calculate Sortino ratio if we have enough daily returns
+        sortino_ratio = 0
+        if len(self.daily_returns) > 10:
+            returns_array = np.array(self.daily_returns)
+            excess_returns = returns_array - (self.risk_free_rate / 252)  # Daily risk-free rate
+            downside_returns = excess_returns[excess_returns < 0]
+            if len(downside_returns) > 0:
+                sortino_ratio = np.mean(excess_returns) / (np.std(downside_returns) + 1e-6) * np.sqrt(252)  # Annualized
+        
+        # Calculate Calmar ratio
+        calmar_ratio = 0
+        if self.max_drawdown > 0:
+            # Annualized return / max drawdown
+            annualized_return = portfolio_change  # Simplification: not properly annualized
+            calmar_ratio = annualized_return / self.max_drawdown
+        
+        return {
+            'portfolio_value': self.portfolio_value,
+            'balance': self.balance,
+            'position': self.position,
+            'current_price': self.current_price,
+            'current_step': self.current_step,
+            'total_trades': self.total_trades,
+            'winning_trades': self.winning_trades,
+            'losing_trades': self.losing_trades,
+            'win_rate': win_rate,
+            'max_drawdown': self.max_drawdown,
+            'current_drawdown': self.current_drawdown,
+            'portfolio_change': portfolio_change,
+            'avg_entry_price': self.avg_entry_price,
+            'unrealized_profit': self.unrealized_profit,
+            'max_consecutive_wins': self.max_consecutive_wins,
+            'max_consecutive_losses': self.max_consecutive_losses,
+            'consecutive_wins': self.consecutive_wins,
+            'consecutive_losses': self.consecutive_losses,
+            'sharpe_ratio': sharpe_ratio,
+            'sortino_ratio': sortino_ratio,
+            'calmar_ratio': calmar_ratio,
+            'total_reward': self.total_reward,
+            'reward_components': self.reward_components,
+        }
+
+
 
 
 class TensorboardCallback(BaseCallback):

@@ -36,7 +36,7 @@
             "num_episodes": 100,
             "max_steps_per_episode": 500,
             "initial_balance": 10000.0,
-            "max_position": 200,
+            "max_position": 50,
             "transaction_fee": 0.0001,
             "use_lstm_predictions": true,
             "min_confidence": 0.4,
@@ -46,7 +46,29 @@
             "critic_lr": 0.0005,
             "entropy_decay_episodes": 120,
             "enable_random_start": true,
-            "warmup_episodes": 5
+            "warmup_episodes": 5,
+            "reward_strategy": "balanced",
+            "reward_scaling": 1.0,
+            "window_size": 60,
+            "risk_free_rate": 0.03,
+            "risk_aversion": 1.0,
+            "drawdown_penalty_factor": 15.0,
+            "holding_penalty_factor": 0.1,
+            "inactive_penalty_factor": 0.05,
+            "consistency_reward_factor": 0.2,
+            "trend_following_factor": 0.3,
+            "win_streak_factor": 0.1,
+            "net_arch": "medium",
+            "learning_rate": 0.0003,
+            "n_steps": 2048,
+            "batch_size": 64,
+            "n_epochs": 10,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "clip_range": 0.2,
+            "ent_coef": 0.01,
+            "vf_coef": 0.5,
+            "max_grad_norm": 0.5
         }
     },
     "risk_management": {
@@ -57,7 +79,11 @@
     "initial_capital": 2500,
     "data": {
         "symbols": [
-            "AAPL", "MSFT", "GOOGL", "AMZN", "JPM"
+            "AAPL",
+            "MSFT",
+            "GOOGL",
+            "AMZN",
+            "JPM"
         ],
         "lookback_period": 365
     },
