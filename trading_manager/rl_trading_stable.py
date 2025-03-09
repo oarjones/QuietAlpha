@@ -76,16 +76,27 @@ class SimpleTradingEnv(gym.Env):
         #                 if col not in ['datetime', 'open', 'high', 'low', 'close', 'volume']]
         
         self.features = [
-            'EMA_200_norm',        # Contexto tendencia a largo plazo
-            'EMA_21_norm',         # Contexto tendencia intermedia
-            'MACD_diff_norm',      # Señal cambio dirección
-            'RSI_14_norm',         # Fuerza relativa del movimiento
-            'ATR_14_norm',         # Volatilidad absoluta
-            'BB_Width_norm',       # Volatilidad relativa
-            'OBV_norm',            # Volumen acumulado
-            'Force_Index_13_norm', # Fuerza inmediata volumen-precio
-            'ATR_14_norm',         # Riesgo y tamaño posiciones
-            'TrendStrength_norm'   # Indicación general del estado de tendencia
+            'open_norm',
+            'high_norm',
+            'low_norm',
+            'close_norm',
+            'volume_norm',
+            'VWAP_norm',
+            'EMA_8_norm',
+            'EMA_21_norm',
+            'SMA_34_norm',
+            'SMA_50_norm',
+            'SMA_200_norm',
+            'MACD_line_norm',
+            'MACD_signal_norm',
+            'MACD_diff_norm',
+            'RSI_14_norm',
+            'Stoch_k_norm',
+            'Stoch_d_norm',
+            'ATR_14_norm',
+            'ATR_5_norm',
+            'ADX_14_norm',
+            'TrendStrength_norm'
         ]
 
         
