@@ -85,7 +85,7 @@ class DetailedEvalCallback(EvalCallback):
                     max_drawdown = metrics.get('max_drawdown', 0) * 100
                     total_trades = metrics.get('total_trades', 0)
                     sharpe_ratio = metrics.get('sharpe_ratio', 0)
-                    sortino_ratio = metrics.get('sortino_ratio', 0)
+                    
                     
                     # Calculate elapsed time
                     elapsed = time.time() - self.start_time
@@ -101,7 +101,6 @@ class DetailedEvalCallback(EvalCallback):
                         print(f"Max drawdown: {max_drawdown:.2f}%")
                         print(f"Total trades: {total_trades}")
                         print(f"Sharpe ratio: {sharpe_ratio:.4f}")
-                        print(f"Sortino ratio: {sortino_ratio:.4f}")
                         print(f"{'=' * 50}\n")
                 
                 except Exception as e:
@@ -179,7 +178,7 @@ class DetailedTrialEvalCallback(EvalCallback):
                     max_drawdown = metrics.get('max_drawdown', 0) * 100
                     total_trades = metrics.get('total_trades', 0)
                     sharpe_ratio = metrics.get('sharpe_ratio', 0)
-                    sortino_ratio = metrics.get('sortino_ratio', 0)
+                    
                     
                     # Set additional attributes for the trial
                     self.trial.set_user_attr('win_rate', metrics.get('win_rate', 0))
@@ -187,7 +186,6 @@ class DetailedTrialEvalCallback(EvalCallback):
                     self.trial.set_user_attr('max_drawdown', metrics.get('max_drawdown', 0))
                     self.trial.set_user_attr('total_trades', metrics.get('total_trades', 0))
                     self.trial.set_user_attr('sharpe_ratio', sharpe_ratio)
-                    self.trial.set_user_attr('sortino_ratio', sortino_ratio)                           
 
                     # Print metrics
                     if self.verbose > 0:
@@ -479,9 +477,7 @@ def make_enhanced_env(data, config, isEval=False):
             'portfolio_change': sum(env.evaluation_metrics['portfolio_changes']) / max(1, len(env.evaluation_metrics['portfolio_changes'])),
             'max_drawdown': env.evaluation_metrics['max_drawdown_seen'],
             'total_trades': env.evaluation_metrics['total_trades'],
-            'sharpe_ratio': episode_info.get('sharpe_ratio', 0),
-            'sortino_ratio': episode_info.get('sortino_ratio', 0),
-            'calmar_ratio': episode_info.get('calmar_ratio', 0)
+            'sharpe_ratio': episode_info.get('sharpe_ratio', 0)            
         }
         
         # Restaurar el estado original si es necesario
@@ -495,9 +491,7 @@ def make_enhanced_env(data, config, isEval=False):
             'portfolio_change': float(accumulated_metrics['portfolio_change']),
             'max_drawdown': float(accumulated_metrics['max_drawdown']),
             'total_trades': int(accumulated_metrics['total_trades']),
-            'sharpe_ratio': float(accumulated_metrics['sharpe_ratio']),
-            'sortino_ratio': float(accumulated_metrics['sortino_ratio']),
-            'calmar_ratio': float(accumulated_metrics['calmar_ratio'])
+            'sharpe_ratio': float(accumulated_metrics['sharpe_ratio'])
         }
     
     # Add the method to the environment
@@ -654,7 +648,7 @@ def create_enhanced_config(base_config: Dict) -> Dict:
     
     # Add enhanced environment parameters with default values if not present
     if 'reward_strategy' not in rl_config:
-        rl_config['reward_strategy'] = 'balanced'  # 'simple', 'sharpe', 'sortino', or 'balanced'
+        rl_config['reward_strategy'] = 'balanced'  # 'simple', 'sharpe',  or 'balanced'
     
     if 'reward_scaling' not in rl_config:
         rl_config['reward_scaling'] = 1.0
@@ -819,21 +813,13 @@ def run_enhanced_optimization(
         
         # Calculate Sharpe ratio if available
         sharpe_ratio = env_unwrapped._get_info().get('sharpe_ratio', 0)
-        
-        # Calculate Sortino ratio if available
-        sortino_ratio = env_unwrapped._get_info().get('sortino_ratio', 0)
-        
-        # Calculate Calmar ratio if available
-        calmar_ratio = env_unwrapped._get_info().get('calmar_ratio', 0)
-        
+                        
         return {
             'win_rate': win_rate,
             'max_drawdown': max_drawdown,
             'portfolio_change': portfolio_change,
             'total_trades': total_trades,
-            'sharpe_ratio': sharpe_ratio,
-            'sortino_ratio': sortino_ratio,
-            'calmar_ratio': calmar_ratio
+            'sharpe_ratio': sharpe_ratio
         }
     
     # Define sample_params function for Optuna
@@ -843,7 +829,7 @@ def run_enhanced_optimization(
         env_params = {
             'reward_strategy': trial.suggest_categorical(
                 'reward_strategy', 
-                ['balanced', 'sharpe', 'sortino']
+                ['balanced', 'sharpe']
             ),
             'risk_aversion': trial.suggest_float('risk_aversion', 0.5, 2.0),
             'reward_scaling': trial.suggest_float('reward_scaling', 0.5, 2.0),
@@ -1168,8 +1154,6 @@ def run_enhanced_optimization(
         'portfolio_change': float(metrics.get('portfolio_change', 0)),
         'total_trades': int(metrics.get('total_trades', 0)),
         'sharpe_ratio': float(metrics.get('sharpe_ratio', 0)),
-        'sortino_ratio': float(metrics.get('sortino_ratio', 0)),
-        'calmar_ratio': float(metrics.get('calmar_ratio', 0)),
         'training_time': float(training_time),
         'training_time_formatted': time.strftime("%H:%M:%S", time.gmtime(training_time)),
         'best_params': best_params
@@ -1190,321 +1174,318 @@ def run_enhanced_optimization(
         'study': study
     }
 
-def custom_run_enhanced_optimization(
-    data: pd.DataFrame, 
-    config: Dict, 
-    output_dir: str = "models/rl/enhanced",
-    n_trials: int = 20,
-    n_timesteps: int = 100000,
-    final_timesteps: int = 200000,
-    n_jobs: int = 1
-) -> Dict:
-        """
-        Run an enhanced optimization process with better progress reporting using improved callbacks.
+
+# def custom_run_enhanced_optimization(
+#     data: pd.DataFrame, 
+#     config: Dict, 
+#     output_dir: str = "models/rl/enhanced",
+#     n_trials: int = 20,
+#     n_timesteps: int = 100000,
+#     final_timesteps: int = 200000,
+#     n_jobs: int = 1
+# ) -> Dict:
+#         """
+#         Run an enhanced optimization process with better progress reporting using improved callbacks.
         
-        Args:
-            data: Historical price data
-            config: Environment configuration
-            output_dir: Directory to save results
-            n_trials: Number of trials for optimization
-            n_timesteps: Number of timesteps for training during optimization
-            final_timesteps: Number of timesteps for final model training
-            n_jobs: Number of parallel jobs
+#         Args:
+#             data: Historical price data
+#             config: Environment configuration
+#             output_dir: Directory to save results
+#             n_trials: Number of trials for optimization
+#             n_timesteps: Number of timesteps for training during optimization
+#             final_timesteps: Number of timesteps for final model training
+#             n_jobs: Number of parallel jobs
             
-        Returns:
-            Dict: Optimization results
-        """
-        # Create progress callback using the improved version
-        progress_callback = IncrementalTrialCallback(n_trials=n_trials)
+#         Returns:
+#             Dict: Optimization results
+#         """
+#         # Create progress callback using the improved version
+#         progress_callback = IncrementalTrialCallback(n_trials=n_trials)
             
         
-        # Define improved objective function that uses DetailedTrialEvalCallback
-        def enhanced_objective(trial):
-            """Enhanced objective function using improved callbacks."""
-            from stable_baselines3 import PPO
-            import torch.nn as nn
+#         # Define improved objective function that uses DetailedTrialEvalCallback
+#         def enhanced_objective(trial):
+#             """Enhanced objective function using improved callbacks."""
+#             from stable_baselines3 import PPO
+#             import torch.nn as nn
             
-            # Sample parameters (same as in run_enhanced_optimization)
-            env_params = {
-                'reward_strategy': trial.suggest_categorical(
-                    'reward_strategy', 
-                    ['balanced', 'sharpe', 'sortino']
-                ),
-                'risk_aversion': trial.suggest_float('risk_aversion', 0.5, 2.0),
-                'reward_scaling': trial.suggest_float('reward_scaling', 0.5, 2.0),
-                'drawdown_penalty_factor': trial.suggest_float('drawdown_penalty_factor', 5.0, 25.0),
-                'holding_penalty_factor': trial.suggest_float('holding_penalty_factor', 0.05, 0.2),
-                'inactive_penalty_factor': trial.suggest_float('inactive_penalty_factor', 0.01, 0.1),
-                'consistency_reward_factor': trial.suggest_float('consistency_reward_factor', 0.1, 0.4),
-                'trend_following_factor': trial.suggest_float('trend_following_factor', 0.1, 0.5),
-                'win_streak_factor': trial.suggest_float('win_streak_factor', 0.05, 0.2)
-            }
+#             # Sample parameters (same as in run_enhanced_optimization)
+#             env_params = {
+#                 'reward_strategy': trial.suggest_categorical(
+#                     'reward_strategy', 
+#                     ['balanced', 'sharpe']
+#                 ),
+#                 'risk_aversion': trial.suggest_float('risk_aversion', 0.5, 2.0),
+#                 'reward_scaling': trial.suggest_float('reward_scaling', 0.5, 2.0),
+#                 'drawdown_penalty_factor': trial.suggest_float('drawdown_penalty_factor', 5.0, 25.0),
+#                 'holding_penalty_factor': trial.suggest_float('holding_penalty_factor', 0.05, 0.2),
+#                 'inactive_penalty_factor': trial.suggest_float('inactive_penalty_factor', 0.01, 0.1),
+#                 'consistency_reward_factor': trial.suggest_float('consistency_reward_factor', 0.1, 0.4),
+#                 'trend_following_factor': trial.suggest_float('trend_following_factor', 0.1, 0.5),
+#                 'win_streak_factor': trial.suggest_float('win_streak_factor', 0.05, 0.2)
+#             }
             
-            # PPO hyperparameters
-            learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
-            n_steps = trial.suggest_categorical("n_steps", [1024, 2048, 4096, 8192])
-            batch_size = trial.suggest_categorical("batch_size", [64, 128, 256, 512])
-            n_epochs = trial.suggest_int("n_epochs", 5, 20)
-            gamma = trial.suggest_float("gamma", 0.9, 0.9999, log=True)
-            gae_lambda = trial.suggest_float("gae_lambda", 0.9, 0.999)
-            clip_range = trial.suggest_float("clip_range", 0.1, 0.3)
-            ent_coef = trial.suggest_float("ent_coef", 0.0, 0.1)
-            vf_coef = trial.suggest_float("vf_coef", 0.4, 1.0)
+#             # PPO hyperparameters
+#             learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
+#             n_steps = trial.suggest_categorical("n_steps", [1024, 2048, 4096, 8192])
+#             batch_size = trial.suggest_categorical("batch_size", [64, 128, 256, 512])
+#             n_epochs = trial.suggest_int("n_epochs", 5, 20)
+#             gamma = trial.suggest_float("gamma", 0.9, 0.9999, log=True)
+#             gae_lambda = trial.suggest_float("gae_lambda", 0.9, 0.999)
+#             clip_range = trial.suggest_float("clip_range", 0.1, 0.3)
+#             ent_coef = trial.suggest_float("ent_coef", 0.0, 0.1)
+#             vf_coef = trial.suggest_float("vf_coef", 0.4, 1.0)
             
-            # Network architecture
-            net_width = trial.suggest_categorical("net_width", [64, 128, 256, 512])
-            net_depth = trial.suggest_int("net_depth", 1, 4)
-            net_arch = [net_width for _ in range(net_depth)]
+#             # Network architecture
+#             net_width = trial.suggest_categorical("net_width", [64, 128, 256, 512])
+#             net_depth = trial.suggest_int("net_depth", 1, 4)
+#             net_arch = [net_width for _ in range(net_depth)]
             
-            # Activation function
-            activation_fn_name = trial.suggest_categorical(
-                "activation_fn", ["tanh", "relu", "elu"]
-            )
-            activation_fn = {
-                "tanh": nn.Tanh,
-                "relu": nn.ReLU,
-                "elu": nn.ELU
-            }[activation_fn_name]
+#             # Activation function
+#             activation_fn_name = trial.suggest_categorical(
+#                 "activation_fn", ["tanh", "relu", "elu"]
+#             )
+#             activation_fn = {
+#                 "tanh": nn.Tanh,
+#                 "relu": nn.ReLU,
+#                 "elu": nn.ELU
+#             }[activation_fn_name]
             
-            # Update environment configuration with sampled parameters
-            trial_config = config.copy()
-            trial_config.update(env_params)
+#             # Update environment configuration with sampled parameters
+#             trial_config = config.copy()
+#             trial_config.update(env_params)
             
-            # Create environments
-            env = make_enhanced_env(data, trial_config)
-            eval_env = make_enhanced_env(data, trial_config)
+#             # Create environments
+#             env = make_enhanced_env(data, trial_config)
+#             eval_env = make_enhanced_env(data, trial_config)
             
-            # Create policy kwargs
-            policy_kwargs = {
-                "net_arch": net_arch,
-                "activation_fn": activation_fn
-            }
+#             # Create policy kwargs
+#             policy_kwargs = {
+#                 "net_arch": net_arch,
+#                 "activation_fn": activation_fn
+#             }
             
-            # Create model
-            ppo_params = {
-                "learning_rate": learning_rate,
-                "n_steps": n_steps,
-                "batch_size": batch_size,
-                "n_epochs": n_epochs,
-                "gamma": gamma,
-                "gae_lambda": gae_lambda,
-                "clip_range": clip_range,
-                "ent_coef": ent_coef,
-                "vf_coef": vf_coef,
-                "policy_kwargs": policy_kwargs
-            }
+#             # Create model
+#             ppo_params = {
+#                 "learning_rate": learning_rate,
+#                 "n_steps": n_steps,
+#                 "batch_size": batch_size,
+#                 "n_epochs": n_epochs,
+#                 "gamma": gamma,
+#                 "gae_lambda": gae_lambda,
+#                 "clip_range": clip_range,
+#                 "ent_coef": ent_coef,
+#                 "vf_coef": vf_coef,
+#                 "policy_kwargs": policy_kwargs
+#             }
             
-            model = PPO("MlpPolicy", env, verbose=0, **ppo_params)
+#             model = PPO("MlpPolicy", env, verbose=0, **ppo_params)
             
-            # Use DetailedTrialEvalCallback for better evaluation and pruning
-            eval_callback = DetailedTrialEvalCallback(
-                eval_env=eval_env,
-                trial=trial,
-                n_eval_episodes=5,
-                eval_freq=5000,
-                log_path=os.path.join(output_dir, "logs", f"trial_{trial.number}"),
-                best_model_save_path=os.path.join(output_dir, "models", f"trial_{trial.number}"),
-                deterministic=True,
-                verbose=1
-            )
+#             # Use DetailedTrialEvalCallback for better evaluation and pruning
+#             eval_callback = DetailedTrialEvalCallback(
+#                 eval_env=eval_env,
+#                 trial=trial,
+#                 n_eval_episodes=5,
+#                 eval_freq=5000,
+#                 log_path=os.path.join(output_dir, "logs", f"trial_{trial.number}"),
+#                 best_model_save_path=os.path.join(output_dir, "models", f"trial_{trial.number}"),
+#                 deterministic=True,
+#                 verbose=1
+#             )
             
-            try:
-                # Train the model
-                model.learn(total_timesteps=n_timesteps, callback=eval_callback)
+#             try:
+#                 # Train the model
+#                 model.learn(total_timesteps=n_timesteps, callback=eval_callback)
                 
-                # If the trial was pruned, raise a pruned exception
-                if eval_callback.is_pruned:
-                    raise optuna.exceptions.TrialPruned()
+#                 # If the trial was pruned, raise a pruned exception
+#                 if eval_callback.is_pruned:
+#                     raise optuna.exceptions.TrialPruned()
                 
-                # Return best reward as the objective value
-                return eval_callback.best_mean_reward
+#                 # Return best reward as the objective value
+#                 return eval_callback.best_mean_reward
                 
-            except (optuna.exceptions.TrialPruned, Exception) as e:
-                # Handle pruning and other exceptions
-                if isinstance(e, optuna.exceptions.TrialPruned):
-                    print_progress(f"Trial {trial.number} pruned.")
-                else:
-                    print_progress(f"Error in trial {trial.number}: {e}")
+#             except (optuna.exceptions.TrialPruned, Exception) as e:
+#                 # Handle pruning and other exceptions
+#                 if isinstance(e, optuna.exceptions.TrialPruned):
+#                     print_progress(f"Trial {trial.number} pruned.")
+#                 else:
+#                     print_progress(f"Error in trial {trial.number}: {e}")
                 
-                # Re-raise TrialPruned but convert other exceptions to TrialPruned
-                if isinstance(e, optuna.exceptions.TrialPruned):
-                    raise e
-                return float('-inf')
+#                 # Re-raise TrialPruned but convert other exceptions to TrialPruned
+#                 if isinstance(e, optuna.exceptions.TrialPruned):
+#                     raise e
+#                 return float('-inf')
         
-        # Create study with improved sampling and pruning
-        sampler = TPESampler(n_startup_trials=5, seed=config.get('seed', 42))
-        pruner = MedianPruner(n_startup_trials=5, n_warmup_steps=5)
+#         # Create study with improved sampling and pruning
+#         sampler = TPESampler(n_startup_trials=5, seed=config.get('seed', 42))
+#         pruner = MedianPruner(n_startup_trials=5, n_warmup_steps=5)
         
-        study = optuna.create_study(
-            study_name=f"enhanced_trading_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-            direction="maximize",
-            sampler=sampler,
-            pruner=pruner
-        )
+#         study = optuna.create_study(
+#             study_name=f"enhanced_trading_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+#             direction="maximize",
+#             sampler=sampler,
+#             pruner=pruner
+#         )
         
-        try:
-            # Run optimization with improved callback
-            study.optimize(
-                enhanced_objective,
-                n_trials=n_trials,
-                n_jobs=n_jobs,
-                callbacks=[progress_callback],
-                show_progress_bar=True
-            )
+#         try:
+#             # Run optimization with improved callback
+#             study.optimize(
+#                 enhanced_objective,
+#                 n_trials=n_trials,
+#                 n_jobs=n_jobs,
+#                 callbacks=[progress_callback],
+#                 show_progress_bar=True
+#             )
             
-            # Finalize progress report
-            progress_callback.finalize()
+#             # Finalize progress report
+#             progress_callback.finalize()
             
-            # Get best trial and parameters
-            best_trial = study.best_trial
-            best_params = best_trial.params
+#             # Get best trial and parameters
+#             best_trial = study.best_trial
+#             best_params = best_trial.params
             
-            # Convert best parameters back to format expected by run_enhanced_optimization
-            activation_fn_name = best_params.pop("activation_fn")
-            net_width = best_params.pop("net_width")
-            net_depth = best_params.pop("net_depth")
-            net_arch = [net_width for _ in range(net_depth)]
+#             # Convert best parameters back to format expected by run_enhanced_optimization
+#             activation_fn_name = best_params.pop("activation_fn")
+#             net_width = best_params.pop("net_width")
+#             net_depth = best_params.pop("net_depth")
+#             net_arch = [net_width for _ in range(net_depth)]
             
-            # Separate environment parameters
-            env_params = {
-                'reward_strategy': best_params.pop('reward_strategy'),
-                'risk_aversion': best_params.pop('risk_aversion'),
-                'reward_scaling': best_params.pop('reward_scaling'),
-                'drawdown_penalty_factor': best_params.pop('drawdown_penalty_factor'),
-                'holding_penalty_factor': best_params.pop('holding_penalty_factor'),
-                'inactive_penalty_factor': best_params.pop('inactive_penalty_factor'),
-                'consistency_reward_factor': best_params.pop('consistency_reward_factor'),
-                'trend_following_factor': best_params.pop('trend_following_factor'),
-                'win_streak_factor': best_params.pop('win_streak_factor')
-            }
+#             # Separate environment parameters
+#             env_params = {
+#                 'reward_strategy': best_params.pop('reward_strategy'),
+#                 'risk_aversion': best_params.pop('risk_aversion'),
+#                 'reward_scaling': best_params.pop('reward_scaling'),
+#                 'drawdown_penalty_factor': best_params.pop('drawdown_penalty_factor'),
+#                 'holding_penalty_factor': best_params.pop('holding_penalty_factor'),
+#                 'inactive_penalty_factor': best_params.pop('inactive_penalty_factor'),
+#                 'consistency_reward_factor': best_params.pop('consistency_reward_factor'),
+#                 'trend_following_factor': best_params.pop('trend_following_factor'),
+#                 'win_streak_factor': best_params.pop('win_streak_factor')
+#             }
             
-            # Create policy kwargs
-            policy_kwargs = {
-                "net_arch": net_arch,
-                "activation_fn": activation_fn_name
-            }
+#             # Create policy kwargs
+#             policy_kwargs = {
+#                 "net_arch": net_arch,
+#                 "activation_fn": activation_fn_name
+#             }
             
-            # Bundle remaining parameters as ppo_params
-            ppo_params = {
-                key: best_params[key] for key in [
-                    "learning_rate", "n_steps", "batch_size", "n_epochs",
-                    "gamma", "gae_lambda", "clip_range", "ent_coef", "vf_coef"
-                ]
-            }
+#             # Bundle remaining parameters as ppo_params
+#             ppo_params = {
+#                 key: best_params[key] for key in [
+#                     "learning_rate", "n_steps", "batch_size", "n_epochs",
+#                     "gamma", "gae_lambda", "clip_range", "ent_coef", "vf_coef"
+#                 ]
+#             }
             
-            # Organize results in expected format
-            best_params = {
-                'env_params': env_params,
-                'policy_kwargs': policy_kwargs,
-                'ppo_params': ppo_params
-            }
+#             # Organize results in expected format
+#             best_params = {
+#                 'env_params': env_params,
+#                 'policy_kwargs': policy_kwargs,
+#                 'ppo_params': ppo_params
+#             }
             
-            # Train final model with best parameters
-            print_progress(f"\nTraining final model with best parameters...")
+#             # Train final model with best parameters
+#             print_progress(f"\nTraining final model with best parameters...")
             
-            # Create environment with best parameters
-            final_config = config.copy()
-            final_config.update(env_params)
+#             # Create environment with best parameters
+#             final_config = config.copy()
+#             final_config.update(env_params)
             
-            final_env = make_enhanced_env(data, final_config)
-            final_eval_env = make_enhanced_env(data, final_config)
+#             final_env = make_enhanced_env(data, final_config)
+#             final_eval_env = make_enhanced_env(data, final_config)
             
-            # Import activation function properly
-            import torch.nn as nn
-            activation_fn = {
-                "tanh": nn.Tanh,
-                "relu": nn.ReLU,
-                "elu": nn.ELU
-            }[activation_fn_name]
+#             # Import activation function properly
+#             import torch.nn as nn
+#             activation_fn = {
+#                 "tanh": nn.Tanh,
+#                 "relu": nn.ReLU,
+#                 "elu": nn.ELU
+#             }[activation_fn_name]
             
-            # Create final model
-            final_policy_kwargs = {
-                "net_arch": net_arch,
-                "activation_fn": activation_fn
-            }
+#             # Create final model
+#             final_policy_kwargs = {
+#                 "net_arch": net_arch,
+#                 "activation_fn": activation_fn
+#             }
             
-            final_model = PPO(
-                "MlpPolicy",
-                final_env,
-                verbose=1,
-                policy_kwargs=final_policy_kwargs,
-                **ppo_params
-            )
+#             final_model = PPO(
+#                 "MlpPolicy",
+#                 final_env,
+#                 verbose=1,
+#                 policy_kwargs=final_policy_kwargs,
+#                 **ppo_params
+#             )
             
-            final_eval_callback = DetailedEvalCallback(
-                eval_env=final_eval_env,
-                best_model_save_path=os.path.join(output_dir, "final_model"),
-                log_path=os.path.join(output_dir, "logs"),
-                eval_freq=10000,
-                deterministic=True,
-                verbose=1
-            )
+#             final_eval_callback = DetailedEvalCallback(
+#                 eval_env=final_eval_env,
+#                 best_model_save_path=os.path.join(output_dir, "final_model"),
+#                 log_path=os.path.join(output_dir, "logs"),
+#                 eval_freq=10000,
+#                 deterministic=True,
+#                 verbose=1
+#             )
             
-            final_progress_callback = TrainingProgressCallback(
-                total_timesteps=final_timesteps,
-                update_interval=5000,
-                verbose=1
-            )
+#             final_progress_callback = TrainingProgressCallback(
+#                 total_timesteps=final_timesteps,
+#                 update_interval=5000,
+#                 verbose=1
+#             )
             
-            # Train final model
-            start_time = time.time()
-            final_model.learn(
-                total_timesteps=final_timesteps,
-                callback=[final_eval_callback, final_progress_callback]
-            )
-            training_time = time.time() - start_time
+#             # Train final model
+#             start_time = time.time()
+#             final_model.learn(
+#                 total_timesteps=final_timesteps,
+#                 callback=[final_eval_callback, final_progress_callback]
+#             )
+#             training_time = time.time() - start_time
             
-            # Save final model
-            final_model_path = os.path.join(output_dir, "final_model", "model")
-            final_model.save(final_model_path)
+#             # Save final model
+#             final_model_path = os.path.join(output_dir, "final_model", "model")
+#             final_model.save(final_model_path)
             
-            # Evaluate final model
-            from stable_baselines3.common.evaluation import evaluate_policy
-            mean_reward, std_reward = evaluate_policy(
-                final_model, final_eval_env, n_eval_episodes=10
-            )
+#             # Evaluate final model
+#             from stable_baselines3.common.evaluation import evaluate_policy
+#             mean_reward, std_reward = evaluate_policy(
+#                 final_model, final_eval_env, n_eval_episodes=10
+#             )
             
-            # Get environment metrics
-            env_unwrapped = final_env.envs[0].unwrapped
-            info = env_unwrapped._get_info()
+#             # Get environment metrics
+#             env_unwrapped = final_env.envs[0].unwrapped
+#             info = env_unwrapped._get_info()
             
-            # Extract metrics
-            win_rate = info.get('win_rate', 0)
-            portfolio_change = info.get('portfolio_change', 0)
-            max_drawdown = info.get('max_drawdown', 0)
-            total_trades = info.get('total_trades', 0)
-            sharpe_ratio = info.get('sharpe_ratio', 0)
-            sortino_ratio = info.get('sortino_ratio', 0)
-            calmar_ratio = info.get('calmar_ratio', 0)
+#             # Extract metrics
+#             win_rate = info.get('win_rate', 0)
+#             portfolio_change = info.get('portfolio_change', 0)
+#             max_drawdown = info.get('max_drawdown', 0)
+#             total_trades = info.get('total_trades', 0)
+#             sharpe_ratio = info.get('sharpe_ratio', 0)
+                        
+#             # Create results dict
+#             final_results = {
+#                 'mean_reward': float(mean_reward),
+#                 'std_reward': float(std_reward),
+#                 'win_rate': float(win_rate),
+#                 'portfolio_change': float(portfolio_change),
+#                 'max_drawdown': float(max_drawdown),
+#                 'total_trades': int(total_trades),
+#                 'sharpe_ratio': float(sharpe_ratio),
+#                 'training_time': float(training_time),
+#                 'training_time_formatted': time.strftime("%H:%M:%S", time.gmtime(training_time))
+#             }
             
-            # Create results dict
-            final_results = {
-                'mean_reward': float(mean_reward),
-                'std_reward': float(std_reward),
-                'win_rate': float(win_rate),
-                'portfolio_change': float(portfolio_change),
-                'max_drawdown': float(max_drawdown),
-                'total_trades': int(total_trades),
-                'sharpe_ratio': float(sharpe_ratio),
-                'sortino_ratio': float(sortino_ratio),
-                'calmar_ratio': float(calmar_ratio),
-                'training_time': float(training_time),
-                'training_time_formatted': time.strftime("%H:%M:%S", time.gmtime(training_time))
-            }
-            
-            # Return results in expected format
-            return {
-                'best_params': best_params,
-                'final_results': final_results,
-                'study': study
-            }
+#             # Return results in expected format
+#             return {
+#                 'best_params': best_params,
+#                 'final_results': final_results,
+#                 'study': study
+#             }
                 
-        except KeyboardInterrupt:
-            print_progress("\n⚠️ Optimization interrupted by user")
-            # Collect partial results
-            if hasattr(study, 'best_trial'):
-                print_progress(f"Best trial so far: #{study.best_trial.number}, value: {study.best_value:.4f}")
-            return {'status': 'interrupted'}
+#         except KeyboardInterrupt:
+#             print_progress("\n⚠️ Optimization interrupted by user")
+#             # Collect partial results
+#             if hasattr(study, 'best_trial'):
+#                 print_progress(f"Best trial so far: #{study.best_trial.number}, value: {study.best_value:.4f}")
+#             return {'status': 'interrupted'}
 
 
 def simple_rl_training(
@@ -1617,8 +1598,6 @@ def simple_rl_training(
         'portfolio_change': float(info['portfolio_change']),
         'total_trades': int(info['total_trades']),
         'sharpe_ratio': float(info.get('sharpe_ratio', 0)),
-        'sortino_ratio': float(info.get('sortino_ratio', 0)),
-        'calmar_ratio': float(info.get('calmar_ratio', 0)),
         'training_time': float(training_time),
         'training_time_formatted': time.strftime("%H:%M:%S", time.gmtime(training_time)),
         'model_path': model_save_path

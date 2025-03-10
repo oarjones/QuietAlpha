@@ -498,7 +498,7 @@ class EnhancedTradingEnv(gym.Env):
         transaction_fee: float = 0.001,
         reward_scaling: float = 1.0,
         window_size: int = 60,
-        reward_strategy: str = 'balanced',  # Options: 'simple', 'sharpe', 'sortino', 'balanced'
+        reward_strategy: str = 'balanced',  # Options: 'simple', 'sharpe', 'balanced'
         risk_free_rate: float = 0.0,
         risk_aversion: float = 1.0,
         # New parameters for enhanced reward function
@@ -1128,29 +1128,6 @@ class EnhancedTradingEnv(gym.Env):
                 reward = portfolio_performance_reward
                 reward -= (holding_penalty + inactivity_penalty + drawdown_penalty)
         
-        elif self.reward_strategy == 'sortino':
-            # Calculate Sortino ratio based reward (penalizes only downside volatility)
-            if len(self.return_window) > 10:
-                mean_return = np.mean(self.return_window)
-                
-                # Calculate downside deviation (standard deviation of negative returns only)
-                negative_returns = [r for r in self.return_window if r < 0]
-                downside_std = (np.std(negative_returns) if negative_returns else 1e-6) + 1e-8
-                
-                # Calculate rolling Sortino ratio
-                sortino = (mean_return - self.risk_free_rate) / downside_std
-                
-                # Reward is primarily based on Sortino ratio
-                reward = np.tanh(sortino * 2) * self.reward_scaling
-                
-                # Add components for other behaviors
-                reward += action_reward
-                reward -= (holding_penalty + inactivity_penalty + drawdown_penalty)
-            else:
-                # Not enough data for Sortino yet, use standard reward
-                reward = action_reward + portfolio_performance_reward
-                reward -= (holding_penalty + inactivity_penalty + drawdown_penalty)
-        
         elif self.reward_strategy == 'balanced':
             # Most sophisticated reward function that balances all components
             # Combine all reward components with careful weighting
@@ -1197,7 +1174,7 @@ class EnhancedTradingEnv(gym.Env):
         self.total_reward += reward
         
         # Store reward components for analysis
-        self.reward_components['action_reward'] += action_reward
+        self.reward_components['action_reward'] += action_reward    
         self.reward_components['portfolio_performance'] += portfolio_performance_reward
         self.reward_components['holding_penalty'] += holding_penalty
         self.reward_components['drawdown_penalty'] += drawdown_penalty
@@ -1286,22 +1263,8 @@ class EnhancedTradingEnv(gym.Env):
             returns_array = np.array(self.daily_returns)
             excess_returns = returns_array - (self.risk_free_rate / 252)  # Daily risk-free rate
             sharpe_ratio = np.mean(excess_returns) / (np.std(excess_returns) + 1e-6) * np.sqrt(252)  # Annualized
+                        
         
-        # Calculate Sortino ratio if we have enough daily returns
-        sortino_ratio = 0
-        if len(self.daily_returns) > 10:
-            returns_array = np.array(self.daily_returns)
-            excess_returns = returns_array - (self.risk_free_rate / 252)  # Daily risk-free rate
-            downside_returns = excess_returns[excess_returns < 0]
-            if len(downside_returns) > 0:
-                sortino_ratio = np.mean(excess_returns) / (np.std(downside_returns) + 1e-6) * np.sqrt(252)  # Annualized
-        
-        # Calculate Calmar ratio
-        calmar_ratio = 0
-        if self.max_drawdown > 0:
-            # Annualized return / max drawdown
-            annualized_return = portfolio_change  # Simplification: not properly annualized
-            calmar_ratio = annualized_return / self.max_drawdown
         
         return {
             'portfolio_value': self.portfolio_value,
@@ -1323,8 +1286,6 @@ class EnhancedTradingEnv(gym.Env):
             'consecutive_wins': self.consecutive_wins,
             'consecutive_losses': self.consecutive_losses,
             'sharpe_ratio': sharpe_ratio,
-            'sortino_ratio': sortino_ratio,
-            'calmar_ratio': calmar_ratio,
             'total_reward': self.total_reward,
             'reward_components': self.reward_components,
         }

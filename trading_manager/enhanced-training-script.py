@@ -12,6 +12,7 @@ Usage:
     python enhanced-training-script.py --symbol MSFT --n-trials 30 --enable-optuna
 """
 
+import csv
 import os
 import argparse
 import logging
@@ -278,7 +279,7 @@ def custom_run_enhanced_optimization(
         env_params = {
             'reward_strategy': trial.suggest_categorical(
                 'reward_strategy', 
-                ['balanced', 'sharpe', 'sortino']
+                ['balanced', 'sharpe']
             ),
             'risk_aversion': trial.suggest_float('risk_aversion', 0.5, 2.0),
             'reward_scaling': trial.suggest_float('reward_scaling', 0.5, 2.0),
@@ -320,6 +321,8 @@ def custom_run_enhanced_optimization(
         trial_config = config.copy()
         trial_config.update(env_params)
         
+                
+
         # Create environments
         env = make_enhanced_env(data, trial_config, False)
         eval_env = make_enhanced_env(data, trial_config, True)
@@ -343,6 +346,32 @@ def custom_run_enhanced_optimization(
             "vf_coef": vf_coef,
             "policy_kwargs": policy_kwargs
         }
+
+        # Save trial config to JSON
+        trial_config_path = os.path.join(output_dir, "trial_configs")
+        os.makedirs(trial_config_path, exist_ok=True)
+        trial_config_file = os.path.join(trial_config_path, 'trials_config.json')
+
+        trial_config = {
+            'trial_number': trial.number,
+            'policy_kwargs': policy_kwargs,
+            'ppo_params': ppo_params,
+            'env_params': env_params
+        }
+
+        # Load existing configs if file exists
+        existing_configs = []
+        if os.path.exists(trial_config_file):
+            with open(trial_config_file, 'r') as f:
+                existing_configs = json.load(f)
+
+        # Append new trial config
+        existing_configs.append(trial_config)
+
+        # Save updated configs
+        with open(trial_config_file, 'w') as f:
+            json.dump(existing_configs, f, indent=4)
+
         
         model = PPO("MlpPolicy", env, verbose=0, **ppo_params)
         
@@ -534,8 +563,6 @@ def custom_run_enhanced_optimization(
         max_drawdown = info.get('max_drawdown', 0)
         total_trades = info.get('total_trades', 0)
         sharpe_ratio = info.get('sharpe_ratio', 0)
-        sortino_ratio = info.get('sortino_ratio', 0)
-        calmar_ratio = info.get('calmar_ratio', 0)
         
         # Create results dict
         final_results = {
@@ -546,8 +573,6 @@ def custom_run_enhanced_optimization(
             'max_drawdown': float(max_drawdown),
             'total_trades': int(total_trades),
             'sharpe_ratio': float(sharpe_ratio),
-            'sortino_ratio': float(sortino_ratio),
-            'calmar_ratio': float(calmar_ratio),
             'training_time': float(training_time),
             'training_time_formatted': time.strftime("%H:%M:%S", time.gmtime(training_time))
         }
@@ -722,8 +747,6 @@ def simple_rl_training(
         'portfolio_change': float(info['portfolio_change']),
         'total_trades': int(info['total_trades']),
         'sharpe_ratio': float(info.get('sharpe_ratio', 0)),
-        'sortino_ratio': float(info.get('sortino_ratio', 0)),
-        'calmar_ratio': float(info.get('calmar_ratio', 0)),
         'training_time': float(training_time),
         'training_time_formatted': time.strftime("%H:%M:%S", time.gmtime(training_time)),
         'model_path': model_save_path
@@ -965,7 +988,6 @@ def main():
         print(f"  Win Rate:          {final_results['win_rate'] * 100:.2f}%")
         print(f"  Portfolio Change:  {final_results['portfolio_change'] * 100:.2f}%")
         print(f"  Sharpe Ratio:      {final_results['sharpe_ratio']:.4f}")
-        print(f"  Sortino Ratio:     {final_results['sortino_ratio']:.4f}")
         print(f"  Max Drawdown:      {final_results['max_drawdown'] * 100:.2f}%")
         print(f"  Total Trades:      {final_results['total_trades']}")
         print(f"  Training Time:     {final_results['training_time_formatted']}")
@@ -1025,7 +1047,6 @@ def main():
         print(f"Win Rate:         {result['win_rate'] * 100:.2f}%")
         print(f"Portfolio Change: {result['portfolio_change'] * 100:.2f}%")
         print(f"Sharpe Ratio:     {result['sharpe_ratio']:.4f}")
-        print(f"Sortino Ratio:    {result['sortino_ratio']:.4f}")
         print(f"Max Drawdown:     {result['max_drawdown'] * 100:.2f}%")
         print(f"Total Trades:     {result['total_trades']}")
         print(f"Training Time:    {result['training_time_formatted']}")
