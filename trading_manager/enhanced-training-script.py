@@ -240,42 +240,109 @@ class ProgressCallback:
         print("=" * 80 + "\n")
 
 
+"""
+Integración de Enhanced Pruning en el flujo de optimización con Optuna
+
+Este código demuestra cómo integrar la estrategia de pruning mejorada en el
+flujo de optimización existente en el script enhanced-training-script.py.
+"""
+
+import os
+import logging
+import numpy as np
+import time
+from typing import Dict
+import optuna
+
+from integration_helpers import DetailedTrialEvalCallback, create_pruning_config
+
+# Configuramos el logging
+logger = logging.getLogger(__name__)
 
 def custom_run_enhanced_optimization(
-    data: pd.DataFrame, 
-    config: Dict, 
-    output_dir: str = "models/rl/enhanced",
-    n_trials: int = 20,
-    n_timesteps: int = 100000,
-    final_timesteps: int = 200000,
-    n_jobs: int = 1
-) -> Dict:
+    data, 
+    config, 
+    output_dir="models/rl/enhanced",
+    n_trials=20,
+    n_timesteps=100000,
+    final_timesteps=200000,
+    n_jobs=1,
+    pruning_config=None  # Nueva configuración de pruning
+):
     """
-    Run an enhanced optimization process with better progress reporting using improved callbacks.
+    Versión mejorada de la optimización con Optuna que incorpora
+    estrategias avanzadas de pruning basadas en métricas financieras.
     
     Args:
-        data: Historical price data
-        config: Environment configuration
-        output_dir: Directory to save results
-        n_trials: Number of trials for optimization
-        n_timesteps: Number of timesteps for training during optimization
-        final_timesteps: Number of timesteps for final model training
-        n_jobs: Number of parallel jobs
+        data: Datos históricos para el entrenamiento
+        config: Configuración del entorno
+        output_dir: Directorio de salida
+        n_trials: Número de trials para Optuna
+        n_timesteps: Pasos para cada trial
+        final_timesteps: Pasos para el modelo final
+        n_jobs: Número de jobs paralelos
+        pruning_config: Configuración del pruning mejorado (opcional)
         
     Returns:
-        Dict: Optimization results
+        Dict: Resultados de la optimización
     """
-    # Create progress callback using the improved version
-    progress_callback = IncrementalTrialCallback(n_trials=n_trials)
-        
+    # Importamos aquí para evitar problemas de dependencias cíclicas
+    from stable_baselines3 import PPO
+    import torch.nn as nn
+    from trading_manager.integration_helpers import (
+        make_enhanced_env, 
+        IncrementalTrialCallback,
+        TrainingProgressCallback,
+        create_pruning_config
+    )
     
-    # Define improved objective function that uses DetailedTrialEvalCallback
-    def enhanced_objective(trial):
-        """Enhanced objective function using improved callbacks."""
-        from stable_baselines3 import PPO
-        import torch.nn as nn
-        
-        # Sample parameters (same as in run_enhanced_optimization)
+    # Crear directorios para resultados
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(os.path.join(output_dir, "logs"), exist_ok=True)
+    os.makedirs(os.path.join(output_dir, "models"), exist_ok=True)
+    os.makedirs(os.path.join(output_dir, "results"), exist_ok=True)
+    
+    # Si no se proporciona configuración de pruning, usar valores predeterminados adaptados
+    if pruning_config is None:
+        pruning_config = create_pruning_config(
+            # Configuración general más adecuada para trading
+            min_eval_count=2,                     # Empezar a evaluar antes
+            min_trades_for_eval=8,                # Ser más flexible con el número de trades
+            
+            # Umbrales adaptados para trading con RL
+            max_drawdown_threshold=0.35,          # 35% máximo drawdown
+            negative_portfolio_threshold=-0.10,   # -10% portfolio change
+            low_win_rate_threshold=0.30,          # 30% win rate mínimo 
+            
+            # Permitir win rate bajo si hay buenas ganancias
+            allow_low_win_rate_if_profit=True,
+            min_profit_for_low_win_rate=0.08,     # 8% de ganancia compensa win rate bajo
+            
+            # Pruning progresivo después de más trials
+            enable_progressive_pruning=True,
+            progressive_pruning_start=8           # Después de 8 evaluaciones
+        )
+    
+    # Callback para mostrar progreso de la optimización
+    progress_callback = IncrementalTrialCallback(n_trials=n_trials)
+    
+
+    def make_json_serializable(obj):
+        """Convierte un objeto en un formato serializable a JSON."""
+        if isinstance(obj, (int, float, str, bool, type(None))):
+            return obj
+        elif isinstance(obj, list):
+            return [make_json_serializable(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {key: make_json_serializable(value) for key, value in obj.items()}
+        else:
+            # Para otros tipos de objetos, convertir a string
+            return str(obj)
+
+    # Definir la función objetivo con pruning mejorado
+    def objective(trial):
+        """Función objetivo con pruning mejorado para Optuna."""
+        # Muestrear hiperparámetros (igual que en la versión original)
         env_params = {
             'reward_strategy': trial.suggest_categorical(
                 'reward_strategy', 
@@ -291,7 +358,7 @@ def custom_run_enhanced_optimization(
             'win_streak_factor': trial.suggest_float('win_streak_factor', 0.05, 0.2)
         }
         
-        # PPO hyperparameters
+        # PPO hyperparámetros
         learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
         n_steps = trial.suggest_categorical("n_steps", [1024, 2048, 4096, 8192])
         batch_size = trial.suggest_categorical("batch_size", [64, 128, 256, 512])
@@ -302,12 +369,12 @@ def custom_run_enhanced_optimization(
         ent_coef = trial.suggest_float("ent_coef", 0.0, 0.1)
         vf_coef = trial.suggest_float("vf_coef", 0.4, 1.0)
         
-        # Network architecture
+        # Arquitectura de red
         net_width = trial.suggest_categorical("net_width", [64, 128, 256, 512])
         net_depth = trial.suggest_int("net_depth", 1, 4)
         net_arch = [net_width for _ in range(net_depth)]
         
-        # Activation function
+        # Función de activación
         activation_fn_name = trial.suggest_categorical(
             "activation_fn", ["tanh", "relu", "elu"]
         )
@@ -317,23 +384,21 @@ def custom_run_enhanced_optimization(
             "elu": nn.ELU
         }[activation_fn_name]
         
-        # Update environment configuration with sampled parameters
+        # Actualizar configuración del entorno con parámetros muestreados
         trial_config = config.copy()
         trial_config.update(env_params)
         
-                
-
-        # Create environments
+        # Crear entornos de entrenamiento y evaluación
         env = make_enhanced_env(data, trial_config, False)
         eval_env = make_enhanced_env(data, trial_config, True)
         
-        # Create policy kwargs
+        # Crear kwargs de política
         policy_kwargs = {
             "net_arch": net_arch,
             "activation_fn": activation_fn
         }
         
-        # Create model
+        # Parámetros PPO
         ppo_params = {
             "learning_rate": learning_rate,
             "n_steps": n_steps,
@@ -346,39 +411,72 @@ def custom_run_enhanced_optimization(
             "vf_coef": vf_coef,
             "policy_kwargs": policy_kwargs
         }
-
-        # Save trial config to JSON
+        
+        
+        # Código para guardar el trial
         trial_config_path = os.path.join(output_dir, "trial_configs")
         os.makedirs(trial_config_path, exist_ok=True)
         trial_config_file = os.path.join(trial_config_path, 'trials_config.json')
 
-        trial_config = {
+        # Crear información del trial asegurando que sea serializable
+        trial_info = {
             'trial_number': trial.number,
-            'policy_kwargs': policy_kwargs,
-            'ppo_params': ppo_params,
+            'policy_kwargs': {
+                'net_arch': net_arch,
+                'activation_fn': activation_fn_name
+            },
+            'ppo_params': {
+                'learning_rate': ppo_params['learning_rate'],
+                'n_steps': ppo_params['n_steps'],
+                'batch_size': ppo_params['batch_size'],
+                'n_epochs': ppo_params['n_epochs'],
+                'gamma': ppo_params['gamma'],
+                'gae_lambda': ppo_params['gae_lambda'],
+                'clip_range': ppo_params['clip_range'],
+                'ent_coef': ppo_params['ent_coef'],
+                'vf_coef': ppo_params['vf_coef']
+                # Omitimos policy_kwargs para evitar referencias circulares
+            },
             'env_params': env_params
         }
 
-        # Load existing configs if file exists
+        # Convertir toda la estructura a formato serializable
+        serializable_trial_info = make_json_serializable(trial_info)
+
+        # Guardar configuración del trial
+        import json
         existing_configs = []
         if os.path.exists(trial_config_file):
-            with open(trial_config_file, 'r') as f:
-                existing_configs = json.load(f)
+            try:
+                with open(trial_config_file, 'r') as f:
+                    existing_configs = json.load(f)
+            except (json.JSONDecodeError, Exception) as e:
+                print(f"Error leyendo archivo de configuraciones: {e}")
+                existing_configs = []
 
-        # Append new trial config
-        existing_configs.append(trial_config)
+        # Asegurarnos de que existing_configs sea una lista
+        if not isinstance(existing_configs, list):
+            existing_configs = []
 
-        # Save updated configs
-        with open(trial_config_file, 'w') as f:
-            json.dump(existing_configs, f, indent=4)
+        existing_configs.append(serializable_trial_info)
+
+        try:
+            with open(trial_config_file, 'w') as f:
+                json.dump(existing_configs, f, indent=4)
+            print(f"Configuración del trial {trial.number} guardada correctamente")
+        except Exception as e:
+            print(f"Error guardando configuración del trial: {e}")
+
 
         
+        # Crear modelo
         model = PPO("MlpPolicy", env, verbose=0, **ppo_params)
         
-        # Use DetailedTrialEvalCallback for better evaluation and pruning
+        # Usar el callback mejorado con enhanced pruning
         eval_callback = DetailedTrialEvalCallback(
             eval_env=eval_env,
             trial=trial,
+            pruning_config=pruning_config,  # Usar la configuración de pruning mejorada
             n_eval_episodes=5,
             eval_freq=5000,
             log_path=os.path.join(output_dir, "logs", f"trial_{trial.number}"),
@@ -388,71 +486,68 @@ def custom_run_enhanced_optimization(
         )
         
         try:
-            # Train the model
+            # Entrenar el modelo
             model.learn(total_timesteps=n_timesteps, callback=eval_callback)
             
-            # If the trial was pruned, raise a pruned exception
+            # Si el trial fue podado, lanzar excepción
             if eval_callback.is_pruned:
                 raise optuna.exceptions.TrialPruned()
             
-            # Run one final full episode to get complete metrics
+            # Ejecutar un episodio final completo para obtener métricas
             final_metrics = eval_env.run_full_episode(model, deterministic=True)
             
-            # Set final attributes
+            # Establecer atributos finales
             for key, value in final_metrics.items():
-                if key != 'total_reward':  # Skip reward as it's already set
+                if key != 'total_reward':  # Ya reportado como reward
                     trial.set_user_attr(key, value)
             
-            # Return best reward as the objective value
+            # Devolver la mejor recompensa como valor del objetivo
             return eval_callback.best_mean_reward
             
         except (optuna.exceptions.TrialPruned, Exception) as e:
-            # Handle pruning and other exceptions
+            # Manejar excepciones
             if isinstance(e, optuna.exceptions.TrialPruned):
-                print_progress(f"Trial {trial.number} pruned.")
-            else:
-                print_progress(f"Error in trial {trial.number}: {e}")
-            
-            # Re-raise TrialPruned but convert other exceptions to TrialPruned
-            if isinstance(e, optuna.exceptions.TrialPruned):
+                logger.info(f"Trial {trial.number} pruned.")
                 raise e
-            return float('-inf')
+            else:
+                logger.error(f"Error en trial {trial.number}: {e}")
+                return float('-inf')
     
-    # Create study with improved sampling and pruning
-    sampler = TPESampler(n_startup_trials=5, seed=config.get('seed', 42))
-    pruner = MedianPruner(n_startup_trials=5, n_warmup_steps=5)
+    # Crear estudio Optuna con muestreo y poda mejorados
+    sampler = optuna.samplers.TPESampler(n_startup_trials=5, seed=config.get('seed', 42))
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=5)
     
     study = optuna.create_study(
-        study_name=f"enhanced_trading_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        study_name=f"enhanced_trading_{time.strftime('%Y%m%d_%H%M%S')}",
         direction="maximize",
         sampler=sampler,
         pruner=pruner
     )
     
     try:
-        # Run optimization with improved callback
+        # Ejecutar optimización con callbacks mejorados
         study.optimize(
-            enhanced_objective,
+            objective,
             n_trials=n_trials,
             n_jobs=n_jobs,
             callbacks=[progress_callback],
             show_progress_bar=True
         )
         
-        # Finalize progress report
+        # Finalizar reporte de progreso
         progress_callback.finalize()
         
-        # Get best trial and parameters
+        # Obtener mejor trial y parámetros
         best_trial = study.best_trial
         best_params = best_trial.params
         
-        # Convert best parameters back to format expected by run_enhanced_optimization
+        # Convertir parámetros para formato esperado
         activation_fn_name = best_params.pop("activation_fn")
         net_width = best_params.pop("net_width")
         net_depth = best_params.pop("net_depth")
         net_arch = [net_width for _ in range(net_depth)]
         
-        # Separate environment parameters
+        # Separar parámetros de entorno
         env_params = {
             'reward_strategy': best_params.pop('reward_strategy'),
             'risk_aversion': best_params.pop('risk_aversion'),
@@ -465,13 +560,13 @@ def custom_run_enhanced_optimization(
             'win_streak_factor': best_params.pop('win_streak_factor')
         }
         
-        # Create policy kwargs
+        # Crear policy kwargs
         policy_kwargs = {
             "net_arch": net_arch,
             "activation_fn": activation_fn_name
         }
         
-        # Bundle remaining parameters as ppo_params
+        # Empaquetar parámetros restantes como ppo_params
         ppo_params = {
             key: best_params[key] for key in [
                 "learning_rate", "n_steps", "batch_size", "n_epochs",
@@ -479,32 +574,31 @@ def custom_run_enhanced_optimization(
             ]
         }
         
-        # Organize results in expected format
-        best_params = {
+        # Organizar resultados en formato esperado
+        best_params_formatted = {
             'env_params': env_params,
             'policy_kwargs': policy_kwargs,
             'ppo_params': ppo_params
         }
         
-        # Train final model with best parameters
-        print_progress(f"\nTraining final model with best parameters...")
+        # Entrenar modelo final con mejores parámetros
+        logger.info(f"\nEntrenando modelo final con mejores parámetros...")
         
-        # Create environment with best parameters
+        # Crear entorno con mejores parámetros
         final_config = config.copy()
         final_config.update(env_params)
         
         final_env = make_enhanced_env(data, final_config)
         final_eval_env = make_enhanced_env(data, final_config)
         
-        # Import activation function properly
-        import torch.nn as nn
+        # Importar función de activación correctamente
         activation_fn = {
             "tanh": nn.Tanh,
             "relu": nn.ReLU,
             "elu": nn.ELU
         }[activation_fn_name]
         
-        # Create final model
+        # Crear modelo final
         final_policy_kwargs = {
             "net_arch": net_arch,
             "activation_fn": activation_fn
@@ -518,7 +612,8 @@ def custom_run_enhanced_optimization(
             **ppo_params
         )
         
-        
+        # Callback para evaluación durante entrenamiento final
+        from trading_manager.integration_helpers import DetailedEvalCallback
         
         final_eval_callback = DetailedEvalCallback(
             eval_env=final_eval_env,
@@ -535,7 +630,7 @@ def custom_run_enhanced_optimization(
             verbose=1
         )
         
-        # Train final model
+        # Entrenar modelo final
         start_time = time.time()
         final_model.learn(
             total_timesteps=final_timesteps,
@@ -543,28 +638,27 @@ def custom_run_enhanced_optimization(
         )
         training_time = time.time() - start_time
         
-        # Save final model
+        # Guardar modelo final
         final_model_path = os.path.join(output_dir, "final_model", "model")
         final_model.save(final_model_path)
         
-        # Evaluate final model
+        # Evaluar modelo final
         from stable_baselines3.common.evaluation import evaluate_policy
         mean_reward, std_reward = evaluate_policy(
             final_model, final_eval_env, n_eval_episodes=10
         )
         
-        # Get environment metrics
-        env_unwrapped = final_env.envs[0].unwrapped
-        info = env_unwrapped._get_info()
+        # Obtener métricas del entorno
+        final_metrics = final_eval_env.run_full_episode(final_model, deterministic=True)
         
-        # Extract metrics
-        win_rate = info.get('win_rate', 0)
-        portfolio_change = info.get('portfolio_change', 0)
-        max_drawdown = info.get('max_drawdown', 0)
-        total_trades = info.get('total_trades', 0)
-        sharpe_ratio = info.get('sharpe_ratio', 0)
+        # Extraer métricas 
+        win_rate = final_metrics.get('win_rate', 0)
+        portfolio_change = final_metrics.get('portfolio_change', 0)
+        max_drawdown = final_metrics.get('max_drawdown', 0)
+        total_trades = final_metrics.get('total_trades', 0)
+        sharpe_ratio = final_metrics.get('sharpe_ratio', 0)
         
-        # Create results dict
+        # Crear diccionario de resultados
         final_results = {
             'mean_reward': float(mean_reward),
             'std_reward': float(std_reward),
@@ -577,19 +671,130 @@ def custom_run_enhanced_optimization(
             'training_time_formatted': time.strftime("%H:%M:%S", time.gmtime(training_time))
         }
         
-        # Return results in expected format
+        # Guardar resultados en archivo
+        import json
+        with open(os.path.join(output_dir, "results", "final_results.json"), "w") as f:
+            json.dump(final_results, f, indent=4)
+        
+        # # Análisis adicional de los trials
+        # trial_analysis = analyze_trials(study)
+        
+        # # Guardar análisis
+        # with open(os.path.join(output_dir, "results", "trial_analysis.json"), "w") as f:
+        #     json.dump(trial_analysis, f, indent=4)
+        
+        # Devolver resultados
         return {
-            'best_params': best_params,
+            'status': 'success',
+            'best_params': best_params_formatted,
             'final_results': final_results,
             'study': study
         }
         
     except KeyboardInterrupt:
-        print_progress("\n⚠️ Optimization interrupted by user")
-        # Collect partial results
+        logger.warning("\n⚠️ Optimización interrumpida por el usuario")
+        progress_callback.finalize()
+        
+        # Recopilar resultados parciales
         if hasattr(study, 'best_trial'):
-            print_progress(f"Best trial so far: #{study.best_trial.number}, value: {study.best_value:.4f}")
+            logger.info(f"Mejor trial hasta ahora: #{study.best_trial.number}, valor: {study.best_value:.4f}")
+        
         return {'status': 'interrupted'}
+
+
+
+# def analyze_trials(study):
+#     """
+#     Analiza los resultados de los trials para obtener insights sobre el proceso de optimización.
+    
+#     Args:
+#         study: Estudio de Optuna completado
+        
+#     Returns:
+#         dict: Análisis de los trials
+#     """
+#     # Recopilar estadísticas de pruning
+#     pruned_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED]
+#     completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    
+#     # Recopilar razones de pruning
+#     pruning_reasons = {}
+#     for trial in pruned_trials:
+#         reason = trial.user_attrs.get('prune_reason', 'Unknown')
+#         if reason in pruning_reasons:
+#             pruning_reasons[reason] += 1
+#         else:
+#             pruning_reasons[reason] = 1
+    
+#     # Calcular estadísticas de rendimiento
+#     perf_metrics = {
+#         'win_rate': [],
+#         'portfolio_change': [],
+#         'max_drawdown': [],
+#         'total_trades': [],
+#         'sharpe_ratio': []
+#     }
+    
+#     for trial in completed_trials:
+#         if 'win_rate' in trial.user_attrs:
+#             perf_metrics['win_rate'].append(trial.user_attrs['win_rate'])
+#         if 'portfolio_change' in trial.user_attrs:
+#             perf_metrics['portfolio_change'].append(trial.user_attrs['portfolio_change'])
+#         if 'max_drawdown' in trial.user_attrs:
+#             perf_metrics['max_drawdown'].append(trial.user_attrs['max_drawdown'])
+#         if 'total_trades' in trial.user_attrs:
+#             perf_metrics['total_trades'].append(trial.user_attrs['total_trades'])
+#         if 'sharpe_ratio' in trial.user_attrs:
+#             perf_metrics['sharpe_ratio'].append(trial.user_attrs['sharpe_ratio'])
+    
+#     # Calcular estadísticas
+#     stats = {}
+#     for metric, values in perf_metrics.items():
+#         if values:
+#             stats[metric] = {
+#                 'mean': float(np.mean(values)),
+#                 'median': float(np.median(values)),
+#                 'min': float(np.min(values)),
+#                 'max': float(np.max(values)),
+#                 'std': float(np.std(values))
+#             }
+    
+#     # Análisis de los mejores trials
+#     best_trials = sorted(completed_trials, key=lambda t: t.value, reverse=True)[:5]
+#     best_trials_info = []
+    
+#     for i, trial in enumerate(best_trials):
+#         best_trials_info.append({
+#             'rank': i + 1,
+#             'trial_number': trial.number,
+#             'value': float(trial.value) if trial.value is not None else None,
+#             'win_rate': float(trial.user_attrs.get('win_rate', 0)),
+#             'portfolio_change': float(trial.user_attrs.get('portfolio_change', 0)),
+#             'total_trades': int(trial.user_attrs.get('total_trades', 0)),
+#             'params': trial.params
+#         })
+    
+#     # Análisis de terminación temprana (aceleración)
+#     steps_saved = 0
+#     for trial in pruned_trials:
+#         # Estimar pasos ahorrados (simple estimación)
+#         if hasattr(trial, 'last_step'):
+#             steps_saved += n_timesteps - trial.last_step
+#         else:
+#             # Estimación conservadora si no sabemos el paso exacto
+#             steps_saved += n_timesteps // 2
+    
+#     return {
+#         'total_trials': len(study.trials),
+#         'completed_trials': len(completed_trials),
+#         'pruned_trials': len(pruned_trials),
+#         'pruning_reasons': pruning_reasons,
+#         'completion_rate': len(completed_trials) / max(1, len(study.trials)),
+#         'performance_stats': stats,
+#         'best_trials': best_trials_info,
+#         'estimated_steps_saved': steps_saved,
+#         'pruning_efficiency': steps_saved / max(1, n_timesteps * len(pruned_trials)) if pruned_trials else 0
+#     }
 
 
 def simple_rl_training(
@@ -824,13 +1029,13 @@ def main():
     parser = argparse.ArgumentParser(description='Enhanced RL Trading Training')
     parser.add_argument('--symbol', type=str, default='MSFT', help='Symbol to train on')
     parser.add_argument('--config', type=str, default='config/lstm_config.json', help='Path to configuration file')
-    parser.add_argument('--data-file', type=str, default='data/processed/MSFT_processed.csv', help='Path to data file (optional)')
-    parser.add_argument('--lookback-days', type=int, default=730, help='Number of days to look back for data')
-    parser.add_argument('--timesteps', type=int, default=100000, help='Number of timesteps for training')
-    parser.add_argument('--enable-optuna', action='store_true', default=True, help='Enable Optuna optimization')
-    parser.add_argument('--n-trials', type=int, default=20, help='Number of Optuna trials')
+    parser.add_argument('--data-file', type=str, default=None, help='Path to data file (optional)')
+    parser.add_argument('--lookback-days', type=int, default=1095, help='Number of days to look back for data')
+    parser.add_argument('--timesteps', type=int, default=200000, help='Number of timesteps for training')
+    parser.add_argument('--enable-optuna', action='store_true', default=False, help='Enable Optuna optimization')
+    parser.add_argument('--n-trials', type=int, default=35, help='Number of Optuna trials')
     parser.add_argument('--n-jobs', type=int, default=1, help='Number of parallel jobs for Optuna')
-    parser.add_argument('--use-manager', action='store_true', default=False, help='Use trading manager for training')
+    parser.add_argument('--use-manager', action='store_true', default=True, help='Use trading manager for training')
     parser.add_argument('--output-dir', type=str, default='models/rl/enhanced', help='Output directory')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     
@@ -948,6 +1153,33 @@ def main():
     start_time = time.time()
     
     if args.enable_optuna:
+
+        
+        # Load pruning configuration from file
+        pruning_config_path = 'config/pruning_config.json'
+        try:
+            if os.path.exists(pruning_config_path):
+                with open(pruning_config_path, 'r') as f:
+                    pruning_config = json.load(f)
+                print_progress(f"Loaded pruning config from {pruning_config_path}")
+            else:
+            # Use default pruning configuration
+                pruning_config = {
+                    'min_eval_count': 2,
+                    'min_trades_for_eval': 8,
+                    'max_drawdown_threshold': 0.35,
+                    'negative_portfolio_threshold': -0.10,
+                    'low_win_rate_threshold': 0.30,
+                    'allow_low_win_rate_if_profit': True,
+                    'min_profit_for_low_win_rate': 0.08,
+                    'enable_progressive_pruning': True,
+                    'progressive_pruning_start': 8
+                }
+            print_progress("Using default pruning configuration")
+        except Exception as e:
+            logger.warning(f"Error loading pruning config: {e}, using defaults")
+            pruning_config = None
+
         # Run Optuna optimization
         print_progress(f"Starting Optuna optimization with {args.n_trials} trials...")
         result = custom_run_enhanced_optimization(
@@ -957,7 +1189,8 @@ def main():
             n_trials=args.n_trials,
             n_timesteps=args.timesteps // 2,  # Use half timesteps for trials
             final_timesteps=args.timesteps,
-            n_jobs=args.n_jobs
+            n_jobs=args.n_jobs,
+            pruning_config=pruning_config
         )
         
         # Extract and save best parameters to config file

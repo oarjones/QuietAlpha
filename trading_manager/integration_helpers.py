@@ -116,8 +116,11 @@ class DetailedEvalCallback(EvalCallback):
 
 class DetailedTrialEvalCallback(EvalCallback):
     """
-    Versión mejorada del callback de evaluación para pruebas de Optuna que ejecuta
-    correctamente un episodio completo para obtener métricas financieras precisas.
+    Callback mejorado para evaluación y pruning de trials de Optuna.
+    
+    Incorpora múltiples condiciones de pruning basadas en métricas financieras
+    además de la recompensa estándar, para detectar y detener tempranamente
+    trials que muestran comportamientos subóptimos.
     """
     
     def __init__(
@@ -130,6 +133,8 @@ class DetailedTrialEvalCallback(EvalCallback):
         best_model_save_path=None,
         deterministic=True,
         verbose=1,
+        # Parámetros para la estrategia de pruning mejorada
+        pruning_config=None
     ):
         super().__init__(
             eval_env=eval_env,
@@ -146,23 +151,85 @@ class DetailedTrialEvalCallback(EvalCallback):
         self.best_mean_reward = -np.inf
         self.start_time = time.time()
         
-        # Print header for evaluations
+        # Historial de evaluaciones para análisis de tendencias
+        self.eval_history = {
+            'mean_reward': [],
+            'win_rate': [],
+            'portfolio_change': [],
+            'max_drawdown': [],
+            'total_trades': [],
+            'sharpe_ratio': []
+        }
+        
+        # Configuración por defecto para pruning
+        self.pruning_config = {
+            # Número mínimo de evaluaciones antes de aplicar pruning
+            'min_eval_count': 3,
+            
+            # Número mínimo de trades requeridos para evaluación confiable
+            'min_trades_for_eval': 10,
+            
+            # Pruning por drawdown excesivo
+            'max_drawdown_threshold': 0.4,        # Terminar si drawdown > 40%
+            
+            # Pruning por portfolio_change persistentemente negativo
+            'negative_portfolio_threshold': -0.15, # Terminar si portfolio_change < -15%
+            'negative_portfolio_evals': 3,        # Después de 3 evaluaciones
+            
+            # Pruning por win_rate consistentemente bajo con suficientes trades
+            'low_win_rate_threshold': 0.25,       # Terminar si win_rate < 25%
+            'low_win_rate_min_trades': 20,        # Con al menos 20 trades
+            'low_win_rate_evals': 3,              # Después de 3 evaluaciones
+            
+            # Pruning por inactividad (pocos trades)
+            'min_trades_threshold': 5,            # Terminar si trades < 5
+            'min_trades_eval_idx': 3,             # Después de 3 evaluaciones
+            
+            # Pruning por Sharpe ratio negativo persistente
+            'negative_sharpe_threshold': -0.5,    # Terminar si sharpe < -0.5
+            'negative_sharpe_evals': 3,           # Después de 3 evaluaciones
+            
+            # Pruning progresivo (se vuelve más estricto después de ciertos trials)
+            'enable_progressive_pruning': True,
+            'progressive_pruning_start': 10,      # Después de 10 evaluaciones exitosas
+            
+            # Balanceo entre portfolio_change y win_rate para casos especiales
+            'allow_low_win_rate_if_profit': True,
+            'min_profit_for_low_win_rate': 0.1,   # 10% de ganancia compensa win_rate bajo
+        }
+        
+        # Actualizar con configuración personalizada si se proporciona
+        if pruning_config is not None:
+            self.pruning_config.update(pruning_config)
+            
+        # Contadores para pruning progresivo
+        self.consecutive_negative_portfolio = 0
+        self.consecutive_low_win_rate = 0
+        self.consecutive_negative_sharpe = 0
+        
+        # Print header for evaluations if verbose
         if self.verbose > 0:
             print("\nEVALUATION METRICS DURING OPTIMIZATION")
             print(f"{'Timesteps':<10} {'Reward':<10} {'Win Rate':<10} {'Profit %':<10} {'Drawdown':<10} {'Trades':<8} {'Sharpe':<8}")
             print("-" * 70)
     
     def _on_step(self) -> bool:
+        """
+        Método principal llamado durante la optimización en cada paso.
+        Implementa la lógica de evaluación y pruning mejorada.
+        """
         if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
-            # Call original evaluation for reward calculation
+            # Primero, ejecutar la evaluación estándar para obtener la recompensa
             continue_training = super()._on_step()
             
-            # Report reward to Optuna for pruning
+            # Incrementar el contador de evaluaciones
             self.eval_idx += 1
+            
+            # Reportar recompensa a Optuna para pruning estándar
             self.trial.report(self.last_mean_reward, self.eval_idx)
             
-            # Get financial metrics by running a complete episode
-            # El parámetro reset_env=False es crucial para no perder métricas acumuladas
+            # Obtener métricas financieras ejecutando un episodio completo
+            metrics = None
             if hasattr(self.eval_env, 'run_full_episode'):
                 try:
                     # Ejecutar episodio sin resetear el entorno para mantener métricas
@@ -172,47 +239,145 @@ class DetailedTrialEvalCallback(EvalCallback):
                         reset_env=False  # No resetear para mantener métricas acumuladas
                     )
                     
-                    # Extract financial metrics
-                    win_rate = metrics.get('win_rate', 0) * 100
-                    portfolio_change = metrics.get('portfolio_change', 0) * 100
-                    max_drawdown = metrics.get('max_drawdown', 0) * 100
+                    # Extraer métricas financieras clave
+                    win_rate = metrics.get('win_rate', 0)
+                    portfolio_change = metrics.get('portfolio_change', 0)
+                    max_drawdown = metrics.get('max_drawdown', 0)
                     total_trades = metrics.get('total_trades', 0)
                     sharpe_ratio = metrics.get('sharpe_ratio', 0)
                     
+                    # Actualizar historial de evaluaciones
+                    self.eval_history['mean_reward'].append(self.last_mean_reward)
+                    self.eval_history['win_rate'].append(win_rate)
+                    self.eval_history['portfolio_change'].append(portfolio_change)
+                    self.eval_history['max_drawdown'].append(max_drawdown)
+                    self.eval_history['total_trades'].append(total_trades)
+                    self.eval_history['sharpe_ratio'].append(sharpe_ratio)
                     
-                    # Set additional attributes for the trial
-                    self.trial.set_user_attr('win_rate', metrics.get('win_rate', 0))
-                    self.trial.set_user_attr('portfolio_change', metrics.get('portfolio_change', 0))
-                    self.trial.set_user_attr('max_drawdown', metrics.get('max_drawdown', 0))
-                    self.trial.set_user_attr('total_trades', metrics.get('total_trades', 0))
+                    # Establecer atributos para el trial
+                    self.trial.set_user_attr('win_rate', win_rate)
+                    self.trial.set_user_attr('portfolio_change', portfolio_change)
+                    self.trial.set_user_attr('max_drawdown', max_drawdown)
+                    self.trial.set_user_attr('total_trades', total_trades)
                     self.trial.set_user_attr('sharpe_ratio', sharpe_ratio)
-
-                    # Print metrics
+                    
+                    # Mostrar métricas
                     if self.verbose > 0:
-                        print(f"{self.num_timesteps:<10} {self.last_mean_reward:<10.2f} {win_rate:<10.2f} {portfolio_change:<10.2f} {max_drawdown:<10.2f} {total_trades:<8} {sharpe_ratio:<8.2f}")
+                        win_rate_pct = win_rate * 100
+                        portfolio_change_pct = portfolio_change * 100
+                        max_drawdown_pct = max_drawdown * 100
+                        print(f"{self.num_timesteps:<10} {self.last_mean_reward:<10.2f} {win_rate_pct:<10.2f} {portfolio_change_pct:<10.2f} {max_drawdown_pct:<10.2f} {total_trades:<8} {sharpe_ratio:<8.2f}")
                 
                 except Exception as e:
-                    # If metrics extraction fails, just print basic info with zeros
+                    # Si falla la obtención de métricas, registrar error y continuar
+                    logger.error(f"Error obteniendo métricas detalladas: {e}")
+                    metrics = None
+                    
                     if self.verbose > 0:
-                        logger.error(f"Error obteniendo métricas detalladas: {e}")
-                        print(f"{self.num_timesteps:<10} {self.last_mean_reward:<10.2f} 0.00       0.00       0.00       0        0.00")
-            else:
-                # If run_full_episode is not available, print basic info with zeros
-                if self.verbose > 0:
-                    print(f"{self.num_timesteps:<10} {self.last_mean_reward:<10.2f} 0.00       0.00       0.00       0        0.00")
+                        print(f"{self.num_timesteps:<10} {self.last_mean_reward:<10.2f} {'?':<10} {'?':<10} {'?':<10} {'?':<8} {'?':<8}")
             
-            # Prune trial if needed
+            # Comprobar condiciones para pruning solo si tenemos suficientes evaluaciones
+            if self.eval_idx >= self.pruning_config['min_eval_count'] and metrics is not None:
+                should_prune = False
+                prune_reason = ""
+                
+                # 1. Pruning por drawdown excesivo
+                if max_drawdown > self.pruning_config['max_drawdown_threshold']:
+                    should_prune = True
+                    prune_reason = f"Drawdown excesivo ({max_drawdown:.2%})"
+                
+                # 2. Pruning por portfolio_change persistentemente negativo
+                if portfolio_change < self.pruning_config['negative_portfolio_threshold']:
+                    self.consecutive_negative_portfolio += 1
+                    
+                    if self.consecutive_negative_portfolio >= self.pruning_config['negative_portfolio_evals']:
+                        # Comprobar si hay tendencia de mejora a pesar de ser negativo
+                        improving = False
+                        if len(self.eval_history['portfolio_change']) >= 3:
+                            recent_changes = self.eval_history['portfolio_change'][-3:]
+                            if recent_changes[2] > recent_changes[0]:  # Mejorando en las últimas 3 evals
+                                improving = True
+                        
+                        if not improving:
+                            should_prune = True
+                            prune_reason = f"Portfolio change persistentemente negativo ({portfolio_change:.2%})"
+                else:
+                    self.consecutive_negative_portfolio = 0
+                
+                # 3. Pruning por win_rate consistentemente bajo con suficientes trades
+                if (total_trades >= self.pruning_config['low_win_rate_min_trades'] and 
+                    win_rate < self.pruning_config['low_win_rate_threshold']):
+                    
+                    # Permitir win_rate bajo si el portfolio_change es positivo y significativo
+                    if (self.pruning_config['allow_low_win_rate_if_profit'] and 
+                        portfolio_change >= self.pruning_config['min_profit_for_low_win_rate']):
+                        # No incrementar contador si hay buenas ganancias
+                        pass
+                    else:
+                        self.consecutive_low_win_rate += 1
+                        
+                        if self.consecutive_low_win_rate >= self.pruning_config['low_win_rate_evals']:
+                            should_prune = True
+                            prune_reason = f"Win rate consistentemente bajo ({win_rate:.2%}) con {total_trades} trades"
+                else:
+                    self.consecutive_low_win_rate = 0
+                
+                # 4. Pruning por inactividad (pocos trades)
+                if (self.eval_idx >= self.pruning_config['min_trades_eval_idx'] and 
+                    total_trades < self.pruning_config['min_trades_threshold']):
+                    
+                    should_prune = True
+                    prune_reason = f"Pocos trades ({total_trades}) después de {self.eval_idx} evaluaciones"
+                
+                # 5. Pruning por Sharpe ratio negativo persistente (solo si hay suficientes trades y el portfolio es bajo)
+                if total_trades >= self.pruning_config['min_trades_for_eval'] and sharpe_ratio < self.pruning_config['negative_sharpe_threshold']:
+                    self.consecutive_negative_sharpe += 1
+                    
+                    if (self.consecutive_negative_sharpe >= self.pruning_config['negative_sharpe_evals'] and 
+                        portfolio_change < self.pruning_config['min_profit_for_low_win_rate']):
+                        should_prune = True
+                        prune_reason = f"Sharpe ratio persistentemente negativo ({sharpe_ratio:.2f})"
+                else:
+                    self.consecutive_negative_sharpe = 0
+                
+                # 6. Aplicar pruning progresivo si está habilitado
+                if (self.pruning_config['enable_progressive_pruning'] and 
+                    self.eval_idx >= self.pruning_config['progressive_pruning_start']):
+                    # Hacer las condiciones más estrictas con el tiempo
+                    
+                    # Por ejemplo, después de cierto número de evaluaciones, exigir al menos un portfolio_change positivo
+                    if portfolio_change <= 0 and self.eval_idx >= self.pruning_config['progressive_pruning_start'] + 3:
+                        should_prune = True
+                        prune_reason = f"Pruning progresivo: portfolio_change no positivo ({portfolio_change:.2%}) después de {self.eval_idx} evaluaciones"
+                    
+                    # Exigir un mínimo de win_rate después de varias evaluaciones si trades son suficientes
+                    if (total_trades >= 30 and win_rate < 0.33 and 
+                        self.eval_idx >= self.pruning_config['progressive_pruning_start'] + 5):
+                        should_prune = True
+                        prune_reason = f"Pruning progresivo: win_rate insuficiente ({win_rate:.2%}) con {total_trades} trades"
+                
+                # Ejecutar pruning si alguna condición se cumple
+                if should_prune:
+                    if self.verbose > 0:
+                        print(f"\n⚠️ Trial pruned: {prune_reason} [Eval: {self.eval_idx}, Steps: {self.num_timesteps}]")
+                    
+                    # Registrar la razón del pruning como atributo del trial
+                    self.trial.set_user_attr('prune_reason', prune_reason)
+                    
+                    self.is_pruned = True
+                    return False
+            
+            # Comprobar si Optuna sugiere pruning basado en recompensa
             if self.trial.should_prune():
                 self.is_pruned = True
                 if self.verbose > 0:
-                    print(f"Trial pruned at {self.num_timesteps} timesteps with reward {self.last_mean_reward:.2f}")
+                    print(f"\n⚠️ Trial pruned por Optuna (recompensa insuficiente) [Eval: {self.eval_idx}, Steps: {self.num_timesteps}]")
                 return False
                 
             return continue_training
         
         return True
-
-
+    
 class TrainingProgressCallback(BaseCallback):
     """
     Callback for tracking and displaying training progress.
@@ -278,7 +443,6 @@ class TrainingProgressCallback(BaseCallback):
             print(f"Training completed: {self.num_timesteps}/{self.total_timesteps} steps in {elapsed_str} ({steps_per_second:.1f} steps/s)")
             print("-" * 80)
 
-
 class IncrementalTrialCallback:
     """
     Callback to track progress across multiple trials in an optimization.
@@ -342,6 +506,77 @@ class IncrementalTrialCallback:
         if self.best_trial_number is not None:
             print(f"Best trial: #{self.best_trial_number+1} with value {self.best_value:.4f}")
         print("=" * 80 + "\n")
+
+# Esta función ayuda a crear una configuración de pruning personalizada
+def create_pruning_config(
+    # Parámetros generales
+    min_eval_count=3,
+    min_trades_for_eval=10,
+    
+    # Umbrales de pruning
+    max_drawdown_threshold=0.4,
+    negative_portfolio_threshold=-0.15,
+    low_win_rate_threshold=0.25,
+    low_win_rate_min_trades=20,
+    min_trades_threshold=5,
+    negative_sharpe_threshold=-0.5,
+    
+    # Configuración de evals consecutivas
+    negative_portfolio_evals=3,
+    low_win_rate_evals=3,
+    min_trades_eval_idx=3,
+    negative_sharpe_evals=3,
+    
+    # Pruning progresivo
+    enable_progressive_pruning=True,
+    progressive_pruning_start=10,
+    
+    # Configuración especial
+    allow_low_win_rate_if_profit=True,
+    min_profit_for_low_win_rate=0.1
+) -> dict:
+    """
+    Crea una configuración personalizada para el pruning mejorado.
+    
+    Args:
+        min_eval_count: Número mínimo de evaluaciones antes de aplicar pruning
+        min_trades_for_eval: Número mínimo de trades para evaluaciones confiables
+        max_drawdown_threshold: Umbral de drawdown máximo permitido
+        negative_portfolio_threshold: Umbral de portfolio change negativo
+        low_win_rate_threshold: Umbral de win rate bajo
+        low_win_rate_min_trades: Mínimo de trades para evaluar win rate
+        min_trades_threshold: Mínimo de trades requeridos
+        negative_sharpe_threshold: Umbral para Sharpe ratio negativo
+        negative_portfolio_evals: Evaluaciones consecutivas con portfolio negativo
+        low_win_rate_evals: Evaluaciones consecutivas con win rate bajo
+        min_trades_eval_idx: Índice de evaluación para verificar mínimo de trades
+        negative_sharpe_evals: Evaluaciones consecutivas con Sharpe negativo
+        enable_progressive_pruning: Activar pruning progresivo
+        progressive_pruning_start: Cuándo comenzar con pruning progresivo
+        allow_low_win_rate_if_profit: Permitir win rate bajo si hay buenas ganancias
+        min_profit_for_low_win_rate: Ganancia mínima para aceptar win rate bajo
+        
+    Returns:
+        dict: Configuración de pruning personalizada
+    """
+    return {
+        'min_eval_count': min_eval_count,
+        'min_trades_for_eval': min_trades_for_eval,
+        'max_drawdown_threshold': max_drawdown_threshold,
+        'negative_portfolio_threshold': negative_portfolio_threshold,
+        'low_win_rate_threshold': low_win_rate_threshold,
+        'low_win_rate_min_trades': low_win_rate_min_trades,
+        'min_trades_threshold': min_trades_threshold,
+        'negative_sharpe_threshold': negative_sharpe_threshold,
+        'negative_portfolio_evals': negative_portfolio_evals,
+        'low_win_rate_evals': low_win_rate_evals,
+        'min_trades_eval_idx': min_trades_eval_idx,
+        'negative_sharpe_evals': negative_sharpe_evals,
+        'enable_progressive_pruning': enable_progressive_pruning,
+        'progressive_pruning_start': progressive_pruning_start,
+        'allow_low_win_rate_if_profit': allow_low_win_rate_if_profit,
+        'min_profit_for_low_win_rate': min_profit_for_low_win_rate
+    }
 
 def make_enhanced_env(data, config, isEval=False):
     """
@@ -499,7 +734,6 @@ def make_enhanced_env(data, config, isEval=False):
     env.get_unwrapped_env = get_unwrapped_env
     
     return env
-
 
 def enhance_trading_manager(manager: RLTradingStableManager):
     """
